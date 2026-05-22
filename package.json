@@ -1,0 +1,11 @@
+{
+  "name": "szagent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "image:preview": "node scripts/make-image-preview.mjs"
+  },
+  "dependencies": {
+    "sharp": "^0.33.5"
+  }
+}

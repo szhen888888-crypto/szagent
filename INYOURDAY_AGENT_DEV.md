@@ -43,10 +43,7 @@ Run commands through `.venv/bin/...` unless the environment is activated.
 
 - Local GBrain is installed at `/Users/suzhen/gbrain`.
 - Local PGLite brain is initialized at `/Users/suzhen/.gbrain/brain.pglite`.
-- InYourDay seed pages exist and can be read with `gbrain list --tag inyourday` and `gbrain get ...`:
-  - `inyourday/agent-operating-principles`
-  - `inyourday/product-screening-criteria`
-  - `inyourday/competitor-gap-enroute`
+- InYourDay knowledge source lives in repo root `knowledge/` and is synced into `inyourday/...` GBrain slugs with `scripts/sync-gbrain-knowledge.sh`.
 - GBrain embedding now works through Aliyun DashScope / Bailian using its OpenAI-compatible endpoint.
 - Local GBrain has a small patch in `/Users/suzhen/gbrain/src/core/embedding.ts` so the embedding model, dimensions, and batch size can be configured with environment variables:
   - `GBRAIN_EMBED_MODEL`
@@ -58,8 +55,9 @@ Run commands through `.venv/bin/...` unless the environment is activated.
   - `GBRAIN_EMBED_DIMENSIONS=1536`
   - `GBRAIN_EMBED_BATCH_SIZE=10`
 - Do not commit or print the API key. Pass it through `OPENAI_API_KEY` when running GBrain commands.
-- Current stats after embedding: `3` pages, `3` chunks, `3` embedded chunks.
+- Current stats after embedding: `13` pages, `13` chunks, `13` embedded chunks.
 - Use `gbrain query ...` for semantic/hybrid retrieval. `gbrain search ...` is keyword-only full-text search and may return no results for English paraphrases.
+- Use `scripts/run-gbrain-dream.sh` for maintenance. It skips upstream `sync` by default because full repo sync would import unrelated Markdown files; use `--full` only intentionally.
 
 ## Working Architecture Direction
 
@@ -86,14 +84,11 @@ inyourday/operator/
   workspace/
     SOUL.md
     USER.md
-    AGENTS.md
     HEARTBEAT.md
     memory/
       MEMORY.md
       history.jsonl
     skills/
-      product-screening/
-        SKILL.md
 ```
 
 Current instance:
@@ -105,7 +100,7 @@ Current instance:
 - Model: `qwen-plus`
 - Secret handling: config uses `${DASHSCOPE_API_KEY}` and does not store the key directly.
 - Tool safety: `restrictToWorkspace=true`, `exec.enable=false`.
-- Skill added: `workspace/skills/product-screening/SKILL.md`.
+- Skills are intentionally empty until the user provides or approves specific skills.
 
 Run the long-lived instance from the fresh nanobot checkout:
 

@@ -3,7 +3,7 @@
     "defaults": {
       "workspace": "${SZAGENT_ROOT}/inyourday/${ROLE}/workspace",
       "modelPreset": null,
-      "model": "gpt-5.4",
+      "model": "${MODEL_NAME}",
       "provider": "custom",
       "maxTokens": 8192,
       "contextWindowTokens": 65536,
@@ -485,7 +485,7 @@
     "port": 18790,
     "heartbeat": {
       "enabled": true,
-      "intervalS": 1800,
+      "intervalS": 86400,
       "keepRecentMessages": 8
     }
   },

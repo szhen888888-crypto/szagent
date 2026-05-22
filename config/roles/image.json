@@ -6,5 +6,18 @@
       "workspace": "${SZAGENT_ROOT}/inyourday/image/workspace",
       "botName": "InYourDay Image"
     }
+  },
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "${FEISHU_IMAGE_APP_ID}",
+      "appSecret": "${FEISHU_IMAGE_APP_SECRET}",
+      "allowFrom": [
+        "*"
+      ],
+      "groupPolicy": "mention",
+      "topicIsolation": true,
+      "streaming": true
+    }
   }
 }

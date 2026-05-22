@@ -29,15 +29,23 @@ if [ ! -d "$KNOWLEDGE_DIR" ]; then
   exit 1
 fi
 
-while IFS= read -r -d '' file; do
-  rel="${file#$KNOWLEDGE_DIR/}"
-  slug="inyourday/${rel%.md}"
-  echo "sync $slug"
-  gbrain put "$slug" --content "$(<"$file")"
-done < <(find "$KNOWLEDGE_DIR" -type f -name '*.md' -print0 | sort -z)
-
-if [ -n "${OPENAI_API_KEY:-}" ]; then
-  gbrain embed --all
-else
-  echo "GBRAIN_EMBED_API_KEY not set; skipped embedding" >&2
+if [ "${1:-}" = "--full" ]; then
+  shift
+  exec gbrain dream --dir "$ROOT_DIR" "$@"
 fi
+
+if [ "${1:-}" = "--sync-first" ]; then
+  shift
+  "$ROOT_DIR/scripts/sync-gbrain-knowledge.sh"
+fi
+
+if [ "${1:-}" = "--phase" ]; then
+  exec gbrain dream --dir "$KNOWLEDGE_DIR" "$@"
+fi
+
+# Safe default for this repo: shared knowledge is synced by
+# scripts/sync-gbrain-knowledge.sh into inyourday/... slugs. Upstream `sync`
+# would import every Markdown file in the repo, so skip it unless --full is used.
+for phase in lint backlinks extract embed orphans; do
+  gbrain dream --dir "$KNOWLEDGE_DIR" --phase "$phase" "$@"
+done

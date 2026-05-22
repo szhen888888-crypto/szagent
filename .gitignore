@@ -32,6 +32,8 @@ build/
 .vscode/
 
 # Nanobot runtime-heavy state
+inyourday/
+knowledge/
 inyourday/*/workspace/.git/
 inyourday/*/workspace/sessions/
 inyourday/*/workspace/.tool-results/
@@ -41,3 +43,6 @@ inyourday/*/cron/
 
 # Generated configs can be regenerated from config/base + config/roles.
 config/generated/
+
+# Generated image previews.
+assets/previews/
