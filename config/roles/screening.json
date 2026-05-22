@@ -1,0 +1,10 @@
+{
+  "role": "screening",
+  "roleTitle": "Screening",
+  "agents": {
+    "defaults": {
+      "workspace": "${SZAGENT_ROOT}/inyourday/screening/workspace",
+      "botName": "InYourDay Screening"
+    }
+  }
+}

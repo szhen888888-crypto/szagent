@@ -1,0 +1,10 @@
+{
+  "role": "operator",
+  "roleTitle": "Operator",
+  "agents": {
+    "defaults": {
+      "workspace": "${SZAGENT_ROOT}/inyourday/operator/workspace",
+      "botName": "InYourDay Operator"
+    }
+  }
+}

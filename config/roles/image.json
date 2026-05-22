@@ -1,0 +1,10 @@
+{
+  "role": "image",
+  "roleTitle": "Image",
+  "agents": {
+    "defaults": {
+      "workspace": "${SZAGENT_ROOT}/inyourday/image/workspace",
+      "botName": "InYourDay Image"
+    }
+  }
+}

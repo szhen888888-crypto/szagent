@@ -1,0 +1,10 @@
+{
+  "role": "sourcer",
+  "roleTitle": "Sourcer",
+  "agents": {
+    "defaults": {
+      "workspace": "${SZAGENT_ROOT}/inyourday/sourcer/workspace",
+      "botName": "InYourDay Sourcer"
+    }
+  }
+}

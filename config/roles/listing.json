@@ -1,0 +1,10 @@
+{
+  "role": "listing",
+  "roleTitle": "Listing",
+  "agents": {
+    "defaults": {
+      "workspace": "${SZAGENT_ROOT}/inyourday/listing/workspace",
+      "botName": "InYourDay Listing"
+    }
+  }
+}

@@ -5,9 +5,11 @@ nanobot/
 # Secrets and local environment
 .env
 .env.*
+!.env.example
 *.env
 **/.env
 **/.env.*
+!**/.env.example
 *.pem
 *.key
 
@@ -33,5 +35,9 @@ build/
 inyourday/*/workspace/.git/
 inyourday/*/workspace/sessions/
 inyourday/*/workspace/.tool-results/
+inyourday/*/workspace/.gitignore
 inyourday/*/media/
 inyourday/*/cron/
+
+# Generated configs can be regenerated from config/base + config/roles.
+config/generated/

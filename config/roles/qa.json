@@ -1,0 +1,10 @@
+{
+  "role": "qa",
+  "roleTitle": "QA",
+  "agents": {
+    "defaults": {
+      "workspace": "${SZAGENT_ROOT}/inyourday/qa/workspace",
+      "botName": "InYourDay QA"
+    }
+  }
+}

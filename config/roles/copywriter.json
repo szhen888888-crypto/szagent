@@ -1,0 +1,10 @@
+{
+  "role": "copywriter",
+  "roleTitle": "Copywriter",
+  "agents": {
+    "defaults": {
+      "workspace": "${SZAGENT_ROOT}/inyourday/copywriter/workspace",
+      "botName": "InYourDay Copywriter"
+    }
+  }
+}
