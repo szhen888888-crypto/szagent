@@ -59,7 +59,10 @@ class ListingWorkflowState(TypedDict, total=False):
     metrics: dict[str, Any]
 
 
-def _load_candidates(state: ListingWorkflowState) -> ListingWorkflowState:
+def _load_candidates(
+    state: ListingWorkflowState,
+    logger: WorkflowRunLogger | None = None,
+) -> ListingWorkflowState:
     data_path = state.get("data_path") or str(DEFAULT_CANDIDATE_DATA)
     path = Path(data_path)
     if path.exists():
@@ -67,6 +70,12 @@ def _load_candidates(state: ListingWorkflowState) -> ListingWorkflowState:
             data_path=path,
             limit=state.get("limit"),
         )
+        if candidates and logger is not None:
+            logger.rename_for_product(
+                product_name=_candidate_log_name(candidates[0]),
+                product_id=candidates[0].product_id,
+                platform=candidates[0].platform,
+            )
         source = "json"
     else:
         selection = select_unfinished_product_with_adapter(
@@ -78,9 +87,15 @@ def _load_candidates(state: ListingWorkflowState) -> ListingWorkflowState:
                 selection.candidate,
                 database_path=state.get("database_path") or DEFAULT_DATABASE_PATH,
             )
+            if logger is not None:
+                logger.rename_for_product(
+                    product_name=_candidate_log_name(selection.candidate),
+                    product_id=selection.candidate.product_id,
+                    platform=selection.candidate.platform,
+                )
         source = "database_adapter_selection"
 
-    return {
+    result: ListingWorkflowState = {
         "candidates": [candidate.model_dump() for candidate in candidates],
         "metrics": {
             "candidate_count": len(candidates),
@@ -98,6 +113,9 @@ def _load_candidates(state: ListingWorkflowState) -> ListingWorkflowState:
             ),
         },
     }
+    if logger is not None:
+        result["workflow_log_path"] = str(logger.path)
+    return result
 
 
 def _merge_main_images(state: ListingWorkflowState) -> ListingWorkflowState:
@@ -262,6 +280,12 @@ def _selected_product_images(
         }
         set_extra("selected_main_image_path", main_image_source["path"])
     return selected_images
+
+
+def _candidate_log_name(candidate: CandidateProduct) -> str:
+    rawdata = candidate.rawdata if isinstance(candidate.rawdata, dict) else {}
+    title = str(rawdata.get("title") or "").strip()
+    return title or candidate.product_id
 
 
 def _select_enroute_reference(state: ListingWorkflowState) -> ListingWorkflowState:
@@ -460,7 +484,10 @@ def _prepare_review_queue(state: ListingWorkflowState) -> ListingWorkflowState:
 
 def build_listing_graph(logger: WorkflowRunLogger | None = None):
     workflow = StateGraph(ListingWorkflowState)
-    workflow.add_node("load_candidates", _node("load_candidates", _load_candidates, logger))
+    workflow.add_node(
+        "load_candidates",
+        _node("load_candidates", lambda state: _load_candidates(state, logger), logger),
+    )
     workflow.add_node("merge_main_images", _node("merge_main_images", _merge_main_images, logger))
     workflow.add_node(
         "detect_size_reference",

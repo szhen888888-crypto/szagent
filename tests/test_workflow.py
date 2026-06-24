@@ -48,6 +48,7 @@ def test_listing_workflow_builds_drafts_from_candidate_data(tmp_path) -> None:
     assert log_path.exists()
     assert log_path.parent == log_dir
     assert log_path.suffix == ".log"
+    assert log_path.name.startswith("Fixture Product 1__1688__fixture-1")
     log_text = log_path.read_text(encoding="utf-8")
     assert "事件：工作流开始" in log_text
     assert "事件：逻辑单元开始" in log_text

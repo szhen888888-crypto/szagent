@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -53,6 +54,37 @@ class WorkflowRunLogger:
         with self.path.open("a", encoding="utf-8") as file:
             file.write(_format_log_event(record))
             file.write("\n")
+
+    def rename_for_product(
+        self,
+        *,
+        product_name: str,
+        product_id: str,
+        platform: str,
+    ) -> Path:
+        """Rename the current run log file using the selected product name."""
+
+        name_part = _safe_filename(product_name) or "未命名产品"
+        platform_part = _safe_filename(platform) or "unknown-platform"
+        product_part = _safe_filename(product_id) or self.run_id
+        target = self.path.parent / f"{name_part}__{platform_part}__{product_part}.log"
+        if target == self.path:
+            return self.path
+        target = _unique_path(target)
+        previous_path = self.path
+        previous_path.rename(target)
+        self.path = target
+        self.write(
+            "log_file_renamed",
+            data={
+                "product_name": product_name,
+                "product_id": product_id,
+                "platform": platform,
+                "previous_log_path": str(previous_path),
+                "current_log_path": str(target),
+            },
+        )
+        return self.path
 
 
 def create_workflow_logger(
@@ -222,6 +254,7 @@ EVENT_LABELS = {
     "workflow_start": "工作流开始",
     "workflow_end": "工作流结束",
     "workflow_error": "工作流异常",
+    "log_file_renamed": "日志文件重命名",
     "node_start": "逻辑单元开始",
     "node_end": "逻辑单元结束",
     "node_error": "逻辑单元异常",
@@ -254,6 +287,9 @@ FIELD_LABELS = {
     "parsed_output": "解析后输出",
     "image_path": "图片路径",
     "prompt": "提示词",
+    "product_name": "产品名称",
+    "previous_log_path": "原日志路径",
+    "current_log_path": "当前日志路径",
     "error_type": "异常类型",
     "error": "异常信息",
     "traceback": "异常堆栈",
@@ -388,3 +424,24 @@ def _indented_block(text: str) -> str:
 
 def _indent(level: int) -> str:
     return "  " * level
+
+
+def _safe_filename(value: str, max_length: int = 120) -> str:
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    text = re.sub(r'[\\/:*?"<>|]+', "-", text)
+    text = text.strip(" .")
+    if len(text) > max_length:
+        text = text[:max_length].rstrip(" .")
+    return text
+
+
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(2, 1000):
+        candidate = path.with_name(f"{stem}__{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+    return path.with_name(f"{stem}__{uuid.uuid4().hex[:8]}{suffix}")

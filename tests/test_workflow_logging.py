@@ -42,6 +42,24 @@ def test_wrap_node_with_logging_records_input_output_and_decisions(tmp_path) -> 
     assert "- size_reference_result.reason: 有参照" in log_text
 
 
+def test_workflow_logger_renames_file_with_product_name(tmp_path) -> None:
+    logger = WorkflowRunLogger(tmp_path, run_id="run-product")
+    original_path = logger.path
+
+    renamed_path = logger.rename_for_product(
+        product_name='Cool / Necklace: "Pearl"*',
+        platform="1688",
+        product_id="p/1",
+    )
+
+    assert renamed_path.name == "Cool - Necklace- -Pearl-__1688__p-1.log"
+    assert not original_path.exists()
+    assert renamed_path.exists()
+    log_text = renamed_path.read_text(encoding="utf-8")
+    assert "事件：日志文件重命名" in log_text
+    assert "- 产品名称 (product_name): Cool / Necklace: \"Pearl\"*" in log_text
+
+
 def test_extract_decisions_collects_nested_result_flags() -> None:
     decisions = extract_decisions(
         {
