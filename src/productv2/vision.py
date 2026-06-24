@@ -12,6 +12,11 @@ import httpx
 from pydantic import BaseModel, Field
 
 from productv2.config import Settings
+from productv2.workflow_logging import (
+    WorkflowRunLogger,
+    describe_file_for_log,
+    prepare_ai_log_data,
+)
 
 
 T = TypeVar("T")
@@ -55,21 +60,52 @@ def detect_size_reference_images(
     collage_path: str | Path,
     settings: Settings | None = None,
     model: Any | None = None,
+    logger: WorkflowRunLogger | None = None,
 ) -> SizeReferenceDetection:
     """Use OpenAI Responses streaming to detect images with human size reference."""
 
     path = Path(collage_path)
     if model is not None:
+        _log_llm_request(
+            logger,
+            context="size_reference_detection_model",
+            payload={
+                "image_file": describe_file_for_log(path),
+                "raw_messages": _vision_messages(path),
+            },
+        )
         response = model.invoke(_vision_messages(path))
-        return parse_size_reference_detection(_message_text(response))
+        text = _message_text(response)
+        _log_llm_response(
+            logger,
+            context="size_reference_detection_model",
+            text=text,
+        )
+        parsed = parse_size_reference_detection(text)
+        _log_llm_parsed_output(
+            logger,
+            context="size_reference_detection_model",
+            parsed=parsed.model_dump(),
+        )
+        return parsed
 
     active_settings = settings or Settings()
     image_url = _image_file_to_data_url(path)
     payload = build_responses_vision_payload(active_settings, image_url)
+    _log_llm_request(
+        logger,
+        context="size_reference_detection",
+        payload={
+            "image_file": describe_file_for_log(path),
+            "raw_payload": payload,
+        },
+    )
     return request_responses_stream_parsed(
         active_settings,
         payload,
         parse_size_reference_detection,
+        logger=logger,
+        request_context="size_reference_detection",
     )
 
 
@@ -99,6 +135,8 @@ def request_responses_stream_text(
     settings: Settings,
     payload: dict[str, Any],
     max_retries: int | None = None,
+    logger: WorkflowRunLogger | None = None,
+    request_context: str = "responses_stream",
 ) -> str:
     """Call the Responses streaming endpoint with raw HTTP/SSE."""
 
@@ -120,6 +158,15 @@ def request_responses_stream_text(
     last_error: Exception | None = None
     for attempt in range(attempts):
         try:
+            _log_llm_request(
+                logger,
+                context=request_context,
+                payload={
+                    "attempt": attempt + 1,
+                    "endpoint": responses_endpoint_url(settings.openai_api_base),
+                    "raw_payload": payload,
+                },
+            )
             with httpx.stream(
                 "POST",
                 responses_endpoint_url(settings.openai_api_base),
@@ -129,18 +176,27 @@ def request_responses_stream_text(
             ) as response:
                 _raise_for_http_error(response)
                 text = collect_responses_stream_text(response.iter_lines())
+                _log_llm_response(
+                    logger,
+                    context=request_context,
+                    text=text,
+                    attempt=attempt + 1,
+                )
                 if not text.strip():
                     raise EmptyLLMResponseError("Responses API returned empty text")
                 return text
         except httpx.HTTPStatusError as exc:
+            _log_llm_error(logger, request_context, exc, attempt + 1)
             status_code = exc.response.status_code
             if attempt == attempts - 1 or not _is_retryable_status(status_code):
                 raise
             last_error = exc
-        except httpx.TransportError:
+        except httpx.TransportError as exc:
+            _log_llm_error(logger, request_context, exc, attempt + 1)
             if attempt == attempts - 1:
                 raise
         except EmptyLLMResponseError as exc:
+            _log_llm_error(logger, request_context, exc, attempt + 1)
             if attempt == attempts - 1:
                 raise
             last_error = exc
@@ -153,6 +209,8 @@ def request_responses_stream_parsed(
     settings: Settings,
     payload: dict[str, Any],
     parser: Callable[[str], T],
+    logger: WorkflowRunLogger | None = None,
+    request_context: str = "responses_stream",
 ) -> T:
     """Call Responses streaming and retry empty or unparsable model output."""
 
@@ -164,14 +222,24 @@ def request_responses_stream_parsed(
                 settings,
                 payload,
                 max_retries=0,
+                logger=logger,
+                request_context=request_context,
             )
-            return parser(text)
+            parsed = parser(text)
+            _log_llm_parsed_output(
+                logger,
+                context=request_context,
+                parsed=parsed.model_dump() if hasattr(parsed, "model_dump") else parsed,
+            )
+            return parsed
         except httpx.HTTPStatusError as exc:
+            _log_llm_error(logger, request_context, exc, attempt + 1)
             status_code = exc.response.status_code
             if attempt == attempts - 1 or not _is_retryable_status(status_code):
                 raise
             last_error = exc
         except (httpx.TransportError, EmptyLLMResponseError, ValueError) as exc:
+            _log_llm_error(logger, request_context, exc, attempt + 1)
             if attempt == attempts - 1:
                 raise
             last_error = exc
@@ -350,3 +418,74 @@ def _extract_json_object(text: str) -> dict[str, Any]:
         if not match:
             raise
         return json.loads(match.group(0))
+
+
+def _log_llm_request(
+    logger: WorkflowRunLogger | None,
+    *,
+    context: str,
+    payload: dict[str, Any],
+) -> None:
+    if logger is None:
+        return
+    logger.write(
+        "llm_request",
+        data={
+            "request_context": context,
+            **prepare_ai_log_data(payload),
+        },
+    )
+
+
+def _log_llm_response(
+    logger: WorkflowRunLogger | None,
+    *,
+    context: str,
+    text: str,
+    attempt: int | None = None,
+) -> None:
+    if logger is None:
+        return
+    data: dict[str, Any] = {
+        "request_context": context,
+        "raw_response_text": text,
+    }
+    if attempt is not None:
+        data["attempt"] = attempt
+    logger.write("llm_response", data=data)
+
+
+def _log_llm_parsed_output(
+    logger: WorkflowRunLogger | None,
+    *,
+    context: str,
+    parsed: Any,
+) -> None:
+    if logger is None:
+        return
+    logger.write(
+        "llm_parsed_output",
+        data={
+            "request_context": context,
+            "parsed_output": prepare_ai_log_data(parsed),
+        },
+    )
+
+
+def _log_llm_error(
+    logger: WorkflowRunLogger | None,
+    context: str,
+    exc: Exception,
+    attempt: int,
+) -> None:
+    if logger is None:
+        return
+    logger.write(
+        "llm_error",
+        data={
+            "request_context": context,
+            "attempt": attempt,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        },
+    )

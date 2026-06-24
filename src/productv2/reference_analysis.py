@@ -12,8 +12,12 @@ from productv2.vision import (
     _extract_json_object,
     _image_file_to_data_url,
     _message_text,
+    _log_llm_parsed_output,
+    _log_llm_request,
+    _log_llm_response,
     request_responses_stream_parsed,
 )
+from productv2.workflow_logging import WorkflowRunLogger, describe_file_for_log
 
 
 class ModelStyleAnalysis(BaseModel):
@@ -174,13 +178,34 @@ def analyze_enroute_reference_image(
     settings: Settings | None = None,
     model: Any | None = None,
     model_profiles: list[dict[str, Any]] | None = None,
+    logger: WorkflowRunLogger | None = None,
 ) -> EnrouteReferenceAnalysis:
     """Use OpenAI Responses streaming to reverse analyze a wearing reference."""
 
     path = Path(image_path)
     if model is not None:
+        _log_llm_request(
+            logger,
+            context="enroute_reference_analysis_model",
+            payload={
+                "image_file": describe_file_for_log(path),
+                "raw_messages": _vision_messages(path, model_profiles),
+            },
+        )
         response = model.invoke(_vision_messages(path, model_profiles))
-        return parse_enroute_reference_analysis(_message_text(response))
+        text = _message_text(response)
+        _log_llm_response(
+            logger,
+            context="enroute_reference_analysis_model",
+            text=text,
+        )
+        parsed = parse_enroute_reference_analysis(text)
+        _log_llm_parsed_output(
+            logger,
+            context="enroute_reference_analysis_model",
+            parsed=parsed.model_dump(),
+        )
+        return parsed
 
     active_settings = settings or Settings()
     image_url = _image_file_to_data_url(path)
@@ -189,10 +214,20 @@ def analyze_enroute_reference_image(
         image_url,
         model_profiles=model_profiles,
     )
+    _log_llm_request(
+        logger,
+        context="enroute_reference_analysis",
+        payload={
+            "image_file": describe_file_for_log(path),
+            "raw_payload": payload,
+        },
+    )
     return request_responses_stream_parsed(
         active_settings,
         payload,
         parse_enroute_reference_analysis,
+        logger=logger,
+        request_context="enroute_reference_analysis",
     )
 
 

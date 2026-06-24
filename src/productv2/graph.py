@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -158,7 +159,10 @@ def _merge_main_images(state: ListingWorkflowState) -> ListingWorkflowState:
     return {"main_image_result": main_image_result}
 
 
-def _detect_size_reference(state: ListingWorkflowState) -> ListingWorkflowState:
+def _detect_size_reference(
+    state: ListingWorkflowState,
+    logger: WorkflowRunLogger | None = None,
+) -> ListingWorkflowState:
     main_image_result = state.get("main_image_result", {})
     if main_image_result.get("status") != "ok":
         return {
@@ -169,7 +173,11 @@ def _detect_size_reference(state: ListingWorkflowState) -> ListingWorkflowState:
         }
 
     try:
-        detection = detect_size_reference_images(main_image_result["path"])
+        detection = _call_with_optional_logger(
+            detect_size_reference_images,
+            main_image_result["path"],
+            logger=logger,
+        )
     except Exception as exc:  # noqa: BLE001
         size_reference_result = {
             "status": "failed",
@@ -302,7 +310,10 @@ def _select_enroute_reference(state: ListingWorkflowState) -> ListingWorkflowSta
     return {"enroute_reference_result": result}
 
 
-def _analyze_enroute_reference(state: ListingWorkflowState) -> ListingWorkflowState:
+def _analyze_enroute_reference(
+    state: ListingWorkflowState,
+    logger: WorkflowRunLogger | None = None,
+) -> ListingWorkflowState:
     enroute_reference_result = state.get("enroute_reference_result", {})
     if enroute_reference_result.get("status") != "ok":
         result = {
@@ -335,7 +346,11 @@ def _analyze_enroute_reference(state: ListingWorkflowState) -> ListingWorkflowSt
     try:
         analysis = analyze_enroute_reference_image(
             enroute_reference_result["image_path"],
-            model_profiles=model_profiles,
+            **_kwargs_with_optional_logger(
+                analyze_enroute_reference_image,
+                logger=logger,
+                model_profiles=model_profiles,
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         result = {
@@ -449,7 +464,11 @@ def build_listing_graph(logger: WorkflowRunLogger | None = None):
     workflow.add_node("merge_main_images", _node("merge_main_images", _merge_main_images, logger))
     workflow.add_node(
         "detect_size_reference",
-        _node("detect_size_reference", _detect_size_reference, logger),
+        _node(
+            "detect_size_reference",
+            lambda state: _detect_size_reference(state, logger),
+            logger,
+        ),
     )
     workflow.add_node(
         "select_enroute_reference",
@@ -457,7 +476,11 @@ def build_listing_graph(logger: WorkflowRunLogger | None = None):
     )
     workflow.add_node(
         "analyze_enroute_reference",
-        _node("analyze_enroute_reference", _analyze_enroute_reference, logger),
+        _node(
+            "analyze_enroute_reference",
+            lambda state: _analyze_enroute_reference(state, logger),
+            logger,
+        ),
     )
     workflow.add_node(
         "generate_wearing_image",
@@ -501,6 +524,27 @@ def _node(
     if logger is None:
         return func
     return wrap_node_with_logging(node_name, func, logger)
+
+
+def _call_with_optional_logger(func, *args, logger: WorkflowRunLogger | None = None, **kwargs):
+    return func(*args, **_kwargs_with_optional_logger(func, logger=logger, **kwargs))
+
+
+def _kwargs_with_optional_logger(
+    func,
+    logger: WorkflowRunLogger | None = None,
+    **kwargs,
+) -> dict[str, Any]:
+    if logger is None:
+        return kwargs
+    signature = inspect.signature(func)
+    parameters = signature.parameters
+    if "logger" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return {**kwargs, "logger": logger}
+    return kwargs
 
 
 def run_listing_workflow(

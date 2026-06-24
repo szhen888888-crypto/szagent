@@ -1,22 +1,20 @@
-import json
-
 from productv2.workflow_logging import WorkflowRunLogger
 from productv2.workflow_logging import extract_decisions
 from productv2.workflow_logging import wrap_node_with_logging
 
 
-def test_workflow_logger_writes_jsonl_events(tmp_path) -> None:
+def test_workflow_logger_writes_chinese_log_events(tmp_path) -> None:
     logger = WorkflowRunLogger(tmp_path, run_id="run-test")
 
     logger.write("custom", node="node-a", data={"status": "ok"})
 
-    lines = logger.path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    event = json.loads(lines[0])
-    assert event["run_id"] == "run-test"
-    assert event["event"] == "custom"
-    assert event["node"] == "node-a"
-    assert event["data"] == {"status": "ok"}
+    log_text = logger.path.read_text(encoding="utf-8")
+    assert logger.path.name == "run-test.log"
+    assert "工作流运行日志" in log_text
+    assert "运行编号：run-test" in log_text
+    assert "事件：custom" in log_text
+    assert "逻辑单元：node-a" in log_text
+    assert "- status: ok" in log_text
 
 
 def test_wrap_node_with_logging_records_input_output_and_decisions(tmp_path) -> None:
@@ -30,17 +28,18 @@ def test_wrap_node_with_logging_records_input_output_and_decisions(tmp_path) -> 
     output = wrapped({"main_image_result": {"status": "ok"}})
 
     assert output["size_reference_result"]["status"] == "ok"
-    events = [
-        json.loads(line)
-        for line in logger.path.read_text(encoding="utf-8").splitlines()
-    ]
-    assert [event["event"] for event in events] == ["node_start", "node_end"]
-    assert events[0]["data"]["input"]["main_image_result"]["status"] == "ok"
-    assert events[1]["data"]["output"]["size_reference_result"]["reason"] == "有参照"
-    assert events[1]["data"]["decisions"] == {
-        "size_reference_result.status": "ok",
-        "size_reference_result.reason": "有参照",
-    }
+    log_text = logger.path.read_text(encoding="utf-8")
+    assert "事件：逻辑单元开始" in log_text
+    assert "事件：逻辑单元结束" in log_text
+    assert "逻辑单元：detect_size_reference" in log_text
+    assert "- 输入数据 (input):" in log_text
+    assert "- main_image_result:" in log_text
+    assert "- status: ok" in log_text
+    assert "- 输出数据 (output):" in log_text
+    assert "- reason: 有参照" in log_text
+    assert "- 状态记忆摘要 (summary):" in log_text
+    assert "- 判断结果 (decisions):" in log_text
+    assert "- size_reference_result.reason: 有参照" in log_text
 
 
 def test_extract_decisions_collects_nested_result_flags() -> None:

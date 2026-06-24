@@ -11,6 +11,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from productv2.config import Settings
+from productv2.workflow_logging import WorkflowRunLogger, prepare_ai_log_data
 
 
 class ImageGenerationResult(BaseModel):
@@ -34,8 +35,13 @@ class ImageGenerationRequest:
 class ImageGenerationClient:
     """Client for the configured Grsai image generation API."""
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        logger: WorkflowRunLogger | None = None,
+    ) -> None:
         self.settings = settings or Settings()
+        self.logger = logger
 
     def generate(
         self,
@@ -58,12 +64,24 @@ class ImageGenerationClient:
 
     def create(self, request: ImageGenerationRequest) -> ImageGenerationResult:
         payload = self._build_payload(request)
+        self._log_image_ai_request(
+            context="image_generation_create",
+            data={
+                "endpoint": self.generate_url,
+                "raw_payload": payload,
+            },
+        )
         response = self._request_with_retries(
             "POST",
             self.generate_url,
             json=payload,
         )
-        return parse_image_generation_response(response.json())
+        raw_response = response.json()
+        self._log_image_ai_response(
+            context="image_generation_create",
+            data={"raw_response_json": raw_response},
+        )
+        return parse_image_generation_response(raw_response)
 
     def poll(self, task_id: str) -> ImageGenerationResult:
         deadline = time.monotonic() + self.settings.image_generation_poll_timeout
@@ -76,12 +94,24 @@ class ImageGenerationClient:
         return result
 
     def get_result(self, task_id: str) -> ImageGenerationResult:
+        self._log_image_ai_request(
+            context="image_generation_result",
+            data={
+                "endpoint": self.result_url,
+                "raw_payload": {"id": task_id},
+            },
+        )
         response = self._request_with_retries(
             "GET",
             self.result_url,
             params={"id": task_id},
         )
-        return parse_image_generation_response(response.json())
+        raw_response = response.json()
+        self._log_image_ai_response(
+            context="image_generation_result",
+            data={"raw_response_json": raw_response},
+        )
+        return parse_image_generation_response(raw_response)
 
     @property
     def generate_url(self) -> str:
@@ -127,20 +157,68 @@ class ImageGenerationClient:
                 _raise_for_http_error(response)
                 return response
             except httpx.HTTPStatusError as exc:
+                self._log_image_ai_error(method, url, exc, attempt + 1)
                 last_exc = exc
                 if attempt == attempts - 1 or not _is_retryable_status(
                     exc.response.status_code
                 ):
                     raise
             except httpx.TransportError as exc:
+                self._log_image_ai_error(method, url, exc, attempt + 1)
                 last_exc = exc
                 if attempt == attempts - 1:
                     raise
         raise RuntimeError("Image generation request failed") from last_exc
 
+    def _log_image_ai_request(self, context: str, data: dict[str, Any]) -> None:
+        if self.logger is None:
+            return
+        self.logger.write(
+            "image_ai_request",
+            data={
+                "request_context": context,
+                **prepare_ai_log_data(data),
+            },
+        )
 
-def get_image_generator(settings: Settings | None = None) -> ImageGenerationClient:
-    return ImageGenerationClient(settings=settings)
+    def _log_image_ai_response(self, context: str, data: dict[str, Any]) -> None:
+        if self.logger is None:
+            return
+        self.logger.write(
+            "image_ai_response",
+            data={
+                "request_context": context,
+                **prepare_ai_log_data(data),
+            },
+        )
+
+    def _log_image_ai_error(
+        self,
+        method: str,
+        url: str,
+        exc: Exception,
+        attempt: int,
+    ) -> None:
+        if self.logger is None:
+            return
+        self.logger.write(
+            "image_ai_error",
+            data={
+                "request_context": "image_generation_http",
+                "attempt": attempt,
+                "method": method,
+                "endpoint": url,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+
+
+def get_image_generator(
+    settings: Settings | None = None,
+    logger: WorkflowRunLogger | None = None,
+) -> ImageGenerationClient:
+    return ImageGenerationClient(settings=settings, logger=logger)
 
 
 def parse_image_generation_response(payload: dict[str, Any]) -> ImageGenerationResult:

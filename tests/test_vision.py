@@ -7,6 +7,7 @@ from productv2.vision import collect_responses_stream_text
 from productv2.vision import request_responses_stream_parsed
 from productv2.vision import request_responses_stream_text
 from productv2.vision import responses_endpoint_url
+from productv2.workflow_logging import WorkflowRunLogger
 
 
 def test_parse_size_reference_detection_normalizes_numbers() -> None:
@@ -262,3 +263,58 @@ def test_request_responses_stream_parsed_retries_parse_failure(monkeypatch) -> N
 
     assert result == {"ok": True}
     assert len(calls) == 2
+
+
+def test_request_responses_stream_logs_raw_input_output(monkeypatch, tmp_path) -> None:
+    logger = WorkflowRunLogger(tmp_path, run_id="llm-log")
+
+    class FakeResponse:
+        is_error = False
+        status_code = 200
+
+        def __init__(self) -> None:
+            self.request = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+        def iter_lines(self):
+            yield json.dumps(
+                {
+                    "type": "response.output_text.delta",
+                    "delta": '{"ok": true}',
+                }
+            )
+            yield ""
+            yield "data: [DONE]"
+            yield ""
+
+    def fake_stream(method, url, headers, json, timeout):
+        return FakeResponse()
+
+    monkeypatch.setattr("productv2.vision.httpx.stream", fake_stream)
+
+    result = request_responses_stream_parsed(
+        Settings(
+            openai_api_key="sk-test",
+            openai_api_base="https://example.test",
+        ),
+        {"model": "gpt-test", "input": [{"role": "user", "content": "原始提示"}]},
+        json.loads,
+        logger=logger,
+        request_context="fixture_llm",
+    )
+
+    assert result == {"ok": True}
+    log_text = logger.path.read_text(encoding="utf-8")
+    assert "事件：LLM 原始输入" in log_text
+    assert "事件：LLM 原始输出" in log_text
+    assert "事件：LLM 解析结果" in log_text
+    assert "- 调用上下文 (request_context): fixture_llm" in log_text
+    assert "- 原始请求数据 (raw_payload):" in log_text
+    assert "原始提示" in log_text
+    assert "- 原始响应文本 (raw_response_text): {\"ok\": true}" in log_text
+    assert "- 解析后输出 (parsed_output):" in log_text

@@ -47,20 +47,14 @@ def test_listing_workflow_builds_drafts_from_candidate_data(tmp_path) -> None:
     log_path = Path(result["metrics"]["workflow_log_path"])
     assert log_path.exists()
     assert log_path.parent == log_dir
-    events = [
-        json.loads(line)
-        for line in log_path.read_text(encoding="utf-8").splitlines()
-    ]
-    assert events[0]["event"] == "workflow_start"
-    assert any(
-        event["event"] == "node_start" and event["node"] == "load_candidates"
-        for event in events
-    )
-    assert any(
-        event["event"] == "node_end" and event["node"] == "prepare_review_queue"
-        for event in events
-    )
-    assert events[-1]["event"] == "workflow_end"
+    assert log_path.suffix == ".log"
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "事件：工作流开始" in log_text
+    assert "事件：逻辑单元开始" in log_text
+    assert "逻辑单元：load_candidates" in log_text
+    assert "事件：逻辑单元结束" in log_text
+    assert "逻辑单元：prepare_review_queue" in log_text
+    assert "事件：工作流结束" in log_text
 
 
 def test_listing_workflow_falls_back_to_database_when_json_missing(tmp_path) -> None:
@@ -339,24 +333,14 @@ def test_listing_workflow_merges_main_images_without_updating_database(
         "selected_model_profile"
     ]["profile_key"] == "romantic_rebel_european"
     log_path = Path(result["metrics"]["workflow_log_path"])
-    events = [
-        json.loads(line)
-        for line in log_path.read_text(encoding="utf-8").splitlines()
-    ]
-    assert any(
-        event["event"] == "branch_decision"
-        and event["node"] == "detect_size_reference"
-        and event["data"]["branch"] == "select_enroute_reference"
-        for event in events
-    )
-    assert any(
-        event["event"] == "node_end"
-        and event["node"] == "analyze_enroute_reference"
-        and event["data"]["decisions"][
-            "enroute_analysis_result.reference_image_path"
-        ]
-        == str(reference_path)
-        for event in events
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "事件：分支判断" in log_text
+    assert "逻辑单元：detect_size_reference" in log_text
+    assert "- 分支逻辑 (branch): select_enroute_reference" in log_text
+    assert "逻辑单元：analyze_enroute_reference" in log_text
+    assert (
+        f"- enroute_analysis_result.reference_image_path: {reference_path}"
+        in log_text
     )
     wearing_result = result["metrics"]["wearing_image_result"]
     assert wearing_result["status"] == "reserved"

@@ -1,8 +1,9 @@
-"""Per-run workflow JSONL logging."""
+"""Per-run workflow readable Chinese text logging."""
 
 from __future__ import annotations
 
 import json
+import hashlib
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -13,7 +14,7 @@ from productv2.config import DEFAULT_WORKFLOW_LOGS_DIR
 
 
 class WorkflowRunLogger:
-    """Append structured events for one workflow run."""
+    """Append readable events for one workflow run."""
 
     def __init__(
         self,
@@ -21,8 +22,19 @@ class WorkflowRunLogger:
         run_id: str | None = None,
     ) -> None:
         self.run_id = run_id or _new_run_id()
-        self.path = Path(log_dir) / f"{self.run_id}.jsonl"
+        self.path = Path(log_dir) / f"{self.run_id}.log"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(
+            "\n".join(
+                [
+                    "工作流运行日志",
+                    f"运行编号：{self.run_id}",
+                    "=" * 80,
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
 
     def write(
         self,
@@ -39,7 +51,7 @@ class WorkflowRunLogger:
             "data": _jsonable(data or {}),
         }
         with self.path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            file.write(_format_log_event(record))
             file.write("\n")
 
 
@@ -63,6 +75,9 @@ def wrap_node_with_logging(
             data={
                 "input": state,
                 "summary": summarize_state(state),
+                "memory_logic": {
+                    "available_state_keys": sorted(str(key) for key in state.keys()),
+                },
             },
         )
         try:
@@ -86,6 +101,10 @@ def wrap_node_with_logging(
                 "output": output,
                 "summary": summarize_state(output),
                 "decisions": extract_decisions(output),
+                "memory_logic": {
+                    "state_update_keys": sorted(str(key) for key in output.keys()),
+                    "state_update_count": len(output),
+                },
             },
         )
         return output
@@ -197,3 +216,175 @@ def _jsonable(value: Any) -> Any:
 def _new_run_id() -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
+EVENT_LABELS = {
+    "workflow_start": "工作流开始",
+    "workflow_end": "工作流结束",
+    "workflow_error": "工作流异常",
+    "node_start": "逻辑单元开始",
+    "node_end": "逻辑单元结束",
+    "node_error": "逻辑单元异常",
+    "branch_decision": "分支判断",
+    "llm_request": "LLM 原始输入",
+    "llm_response": "LLM 原始输出",
+    "llm_parsed_output": "LLM 解析结果",
+    "llm_error": "LLM 异常",
+    "llm_parse_error": "LLM 解析异常",
+    "image_ai_request": "图片 AI 原始输入",
+    "image_ai_response": "图片 AI 原始输出",
+    "image_ai_error": "图片 AI 异常",
+}
+
+FIELD_LABELS = {
+    "input": "输入数据",
+    "output": "输出数据",
+    "summary": "状态记忆摘要",
+    "decisions": "判断结果",
+    "branch": "分支逻辑",
+    "memory_logic": "状态记忆逻辑",
+    "metrics": "运行指标",
+    "endpoint": "接口地址",
+    "attempt": "调用次数",
+    "request_context": "调用上下文",
+    "raw_payload": "原始请求数据",
+    "raw_messages": "原始消息数据",
+    "raw_response_text": "原始响应文本",
+    "raw_response_json": "原始响应 JSON",
+    "parsed_output": "解析后输出",
+    "image_path": "图片路径",
+    "prompt": "提示词",
+    "error_type": "异常类型",
+    "error": "异常信息",
+    "traceback": "异常堆栈",
+}
+
+
+def prepare_ai_log_data(value: Any) -> Any:
+    """Keep AI inputs/outputs readable while preserving raw prompts and responses."""
+
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): prepare_ai_log_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [prepare_ai_log_data(item) for item in value]
+    if isinstance(value, tuple):
+        return [prepare_ai_log_data(item) for item in value]
+    if isinstance(value, str) and value.startswith("data:image/") and ";base64," in value:
+        prefix, encoded = value.split(";base64,", 1)
+        return {
+            "raw_type": "data_url_image",
+            "mime_type": prefix.removeprefix("data:"),
+            "base64_length": len(encoded),
+            "sha256": hashlib.sha256(encoded.encode("ascii", errors="ignore")).hexdigest(),
+            "preview": f"{prefix};base64,{encoded[:80]}...",
+        }
+    return _jsonable(value)
+
+
+def describe_file_for_log(path: str | Path) -> dict[str, Any]:
+    file_path = Path(path)
+    info: dict[str, Any] = {
+        "path": str(file_path),
+        "exists": file_path.exists(),
+    }
+    if not file_path.exists() or not file_path.is_file():
+        return info
+    data = file_path.read_bytes()
+    info.update(
+        {
+            "size_bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "suffix": file_path.suffix,
+        }
+    )
+    return info
+
+
+def _format_log_event(record: dict[str, Any]) -> str:
+    event_name = str(record["event"])
+    event_label = EVENT_LABELS.get(event_name, event_name)
+    lines = [
+        "-" * 80,
+        f"时间：{record['ts']}",
+        f"事件：{event_label}",
+        f"事件代码：{event_name}",
+        f"运行编号：{record['run_id']}",
+    ]
+    if record.get("node"):
+        lines.append(f"逻辑单元：{record['node']}")
+    data = record.get("data") or {}
+    if data:
+        lines.extend(["", "数据："])
+        lines.extend(_format_log_value(data, level=1))
+    return "\n".join(lines) + "\n"
+
+
+def _format_log_value(value: Any, level: int) -> list[str]:
+    if isinstance(value, dict):
+        return _format_log_dict(value, level)
+    if isinstance(value, list):
+        return _format_log_list(value, level)
+    return [f"{_indent(level)}- {_format_scalar(value)}"]
+
+
+def _format_log_dict(value: dict[str, Any], level: int) -> list[str]:
+    lines: list[str] = []
+    for key, item in value.items():
+        key_text = _field_label(str(key))
+        if isinstance(item, dict):
+            lines.append(f"{_indent(level)}- {key_text}:")
+            lines.extend(_format_log_dict(item, level + 1))
+        elif isinstance(item, list):
+            lines.append(f"{_indent(level)}- {key_text}:")
+            lines.extend(_format_log_list(item, level + 1))
+        else:
+            lines.append(f"{_indent(level)}- {key_text}: {_format_scalar(item)}")
+    return lines
+
+
+def _format_log_list(value: list[Any], level: int) -> list[str]:
+    if not value:
+        return [f"{_indent(level)}- 空列表"]
+
+    lines: list[str] = []
+    for index, item in enumerate(value, start=1):
+        if isinstance(item, dict):
+            lines.append(f"{_indent(level)}- 第{index}项:")
+            lines.extend(_format_log_dict(item, level + 1))
+        elif isinstance(item, list):
+            lines.append(f"{_indent(level)}- 第{index}项:")
+            lines.extend(_format_log_list(item, level + 1))
+        else:
+            lines.append(f"{_indent(level)}- {_format_scalar(item)}")
+    return lines
+
+
+def _format_scalar(value: Any) -> str:
+    if value is None:
+        return "空"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value)
+    if text == "":
+        return '""'
+    if "\n" in text:
+        return "\n" + _indented_block(text)
+    return text
+
+
+def _field_label(key: str) -> str:
+    if key in FIELD_LABELS:
+        return f"{FIELD_LABELS[key]} ({key})"
+    return key
+
+
+def _indented_block(text: str) -> str:
+    return "\n".join(f"    {line}" for line in text.splitlines())
+
+
+def _indent(level: int) -> str:
+    return "  " * level
