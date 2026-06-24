@@ -99,7 +99,7 @@
 
 当前主流程聚焦商品图片处理，不把上架草稿生成视为核心目标。旧的 `ListingDraft` 代码仍存在，但不是当前图片处理主流程的完成标准。
 
-每次调用 `run_listing_workflow()` 都会创建一个独立日志文件，默认位于 `workflow-logs/<product_name>__<platform>__<product_id>.log`。工作流启动时先创建临时运行日志；一旦选中产品，会使用产品名称、平台和产品 ID 重命名日志文件，避免同名产品覆盖，最终路径会写入 `metrics.workflow_log_path`。日志事件包括 `workflow_start`、每个节点的 `node_start` / `node_end`、异常时的 `node_error` / `workflow_error`、以及尺寸检测后的 `branch_decision`。节点日志以中文可读文本记录输入 state、输出 state、状态记忆摘要、状态写回逻辑，并抽取 `status`、`reason`、`cache`、`can_judge_size`、图片编号、选中模特、Enroute 参考图路径等关键判断字段。LLM 和图片 AI 调用必须记录原始输入与原始输出，包括 prompt、请求参数、图片输入路径/URL、模型原始响应文本或接口原始响应 JSON。日志是排查用运行产物，不写入数据库，不纳入 Git。
+每次调用 `run_listing_workflow()` 都会创建一个独立日志文件，默认位于 `workflow-logs/<product_name>__<platform>__<product_id>.log`。工作流启动时先创建临时运行日志；一旦选中产品，会使用产品名称、平台和产品 ID 重命名日志文件，避免同名产品覆盖，最终路径会写入 `metrics.workflow_log_path`。日志事件包括 `workflow_start`、每个节点的 `node_start` / `node_end`、异常时的 `node_error` / `workflow_error`、以及尺寸检测后的 `branch_decision`。每个逻辑单元必须带中文说明，解释该节点在流程中的作用。节点日志以中文可读文本记录输入 state、输出 state、状态记忆摘要、状态写回逻辑，并抽取 `status`、`reason`、`cache`、`can_judge_size`、图片编号、选中模特、Enroute 参考图路径等关键判断字段。候选产品 `candidates` 只记录数量、产品 ID、平台、标题、状态、锁信息和 rawdata 字段名，不记录完整 rawdata。LLM 和图片 AI 调用必须记录原始输入与原始输出，包括 prompt、请求参数、图片输入路径/URL、模型原始响应文本或接口原始响应 JSON。日志是排查用运行产物，不写入数据库，不纳入 Git。
 
 `load_candidates` 默认从 SQLite 读取所有未完成且未加锁商品到内存，随机打乱后逐条检查 `src/productv2/adapters/` 是否存在平台适配器；没有适配器则跳过，直到选中一条商品。显式传入 `data_path` 时才会读取单个 JSON 文件作为调试入口；默认完成状态：`done`、`completed`、`published`；`locked_at` 不为空表示正在处理中，会被过滤。
 

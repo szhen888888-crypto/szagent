@@ -42,6 +42,47 @@ def test_wrap_node_with_logging_records_input_output_and_decisions(tmp_path) -> 
     assert "- size_reference_result.reason: 有参照" in log_text
 
 
+def test_workflow_logger_summarizes_candidates_and_describes_node(tmp_path) -> None:
+    logger = WorkflowRunLogger(tmp_path, run_id="run-candidates")
+
+    def node(state):
+        return {
+            "candidates": state["candidates"],
+            "metrics": {"candidate_count": 1},
+        }
+
+    wrapped = wrap_node_with_logging("load_candidates", node, logger)
+    wrapped(
+        {
+            "candidates": [
+                {
+                    "id": 1,
+                    "product_id": "p-1",
+                    "platform": "1688",
+                    "status": "all_pendding",
+                    "locked_at": None,
+                    "locked_by": None,
+                    "rawdata": {
+                        "title": "测试商品",
+                        "detail": {"image_urls": ["https://example.test/1.jpg"]},
+                        "very_large_field": "SHOULD_NOT_APPEAR",
+                    },
+                }
+            ]
+        }
+    )
+
+    log_text = logger.path.read_text(encoding="utf-8")
+    assert "逻辑单元说明：扫描当前输入状态" in log_text
+    assert "- candidates:" in log_text
+    assert "- 候选数量 (candidate_count): 1" in log_text
+    assert "- title: 测试商品" in log_text
+    assert "- 原始数据字段 (rawdata_keys):" in log_text
+    assert "very_large_field" in log_text
+    assert "SHOULD_NOT_APPEAR" not in log_text
+    assert "https://example.test/1.jpg" not in log_text
+
+
 def test_workflow_logger_renames_file_with_product_name(tmp_path) -> None:
     logger = WorkflowRunLogger(tmp_path, run_id="run-product")
     original_path = logger.path

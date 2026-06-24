@@ -105,7 +105,7 @@ def wrap_node_with_logging(
             "node_start",
             node=node_name,
             data={
-                "input": state,
+                "input": _summarize_workflow_log_data(state),
                 "summary": summarize_state(state),
                 "memory_logic": {
                     "available_state_keys": sorted(str(key) for key in state.keys()),
@@ -130,7 +130,7 @@ def wrap_node_with_logging(
             "node_end",
             node=node_name,
             data={
-                "output": output,
+                "output": _summarize_workflow_log_data(output),
                 "summary": summarize_state(output),
                 "decisions": extract_decisions(output),
                 "memory_logic": {
@@ -165,7 +165,9 @@ def summarize_state(value: Any) -> Any:
     if isinstance(value, dict):
         summary: dict[str, Any] = {}
         for key, item in value.items():
-            if key in {"rawdata", "prompt", "analysis"}:
+            if key == "candidates" and isinstance(item, list):
+                summary[key] = _summarize_candidates(item)
+            elif key in {"rawdata", "prompt", "analysis"}:
                 summary[key] = _summarize_large_value(item)
             elif isinstance(item, (dict, list)):
                 summary[key] = summarize_state(item)
@@ -269,6 +271,17 @@ EVENT_LABELS = {
     "image_ai_error": "图片 AI 异常",
 }
 
+NODE_DESCRIPTIONS = {
+    "load_candidates": "扫描当前输入状态，从显式 JSON 或 SQLite 中加载候选商品，并选择一个有平台适配器的可处理商品。",
+    "merge_main_images": "调用平台适配器获取商品主图，下载可用图片并合并为带编号的临时拼图。",
+    "detect_size_reference": "调用视觉 LLM 检查编号拼图，判断是否存在人体参照，并确定尺寸参考图和产品主图编号。",
+    "select_enroute_reference": "根据当前商品类目，从本地 Enroute 参考图库中选择同类目的 02.jpg 佩戴参考图。",
+    "analyze_enroute_reference": "调用 LLM 逆向分析 Enroute 佩戴参考图，提炼模特、衣物、场景和拍摄风格，并读取或写入缓存。",
+    "generate_wearing_image": "准备佩戴图生成所需的标记主图、尺寸参考图、固定模特图和图片生成 prompt；当前不实际调用生图接口。",
+    "build_listing_drafts": "基于当前候选商品生成旧版上架草稿数据，当前不是主图片流程的完成标准。",
+    "prepare_review_queue": "汇总运行指标、节点结果和待复核草稿，并输出最终工作流结果。",
+}
+
 FIELD_LABELS = {
     "input": "输入数据",
     "output": "输出数据",
@@ -290,6 +303,9 @@ FIELD_LABELS = {
     "product_name": "产品名称",
     "previous_log_path": "原日志路径",
     "current_log_path": "当前日志路径",
+    "candidate_count": "候选数量",
+    "candidate_summaries": "候选摘要",
+    "rawdata_keys": "原始数据字段",
     "error_type": "异常类型",
     "error": "异常信息",
     "traceback": "异常堆栈",
@@ -350,6 +366,9 @@ def _format_log_event(record: dict[str, Any]) -> str:
     ]
     if record.get("node"):
         lines.append(f"逻辑单元：{record['node']}")
+        description = NODE_DESCRIPTIONS.get(str(record["node"]))
+        if description:
+            lines.append(f"逻辑单元说明：{description}")
     data = record.get("data") or {}
     if data:
         lines.extend(["", "数据："])
@@ -424,6 +443,56 @@ def _indented_block(text: str) -> str:
 
 def _indent(level: int) -> str:
     return "  " * level
+
+
+def _summarize_workflow_log_data(value: Any) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "candidates" and isinstance(item, list):
+                result[key] = _summarize_candidates(item)
+            elif isinstance(item, dict):
+                result[key] = _summarize_workflow_log_data(item)
+            elif isinstance(item, list):
+                result[key] = [_summarize_workflow_log_data(child) for child in item]
+            else:
+                result[key] = item
+        return result
+    if isinstance(value, list):
+        return [_summarize_workflow_log_data(item) for item in value]
+    return value
+
+
+def _summarize_candidates(candidates: list[Any]) -> dict[str, Any]:
+    return {
+        "candidate_count": len(candidates),
+        "candidate_summaries": [
+            _candidate_summary(candidate)
+            for candidate in candidates[:10]
+        ],
+        **({"truncated": True} if len(candidates) > 10 else {}),
+    }
+
+
+def _candidate_summary(candidate: Any) -> dict[str, Any]:
+    if hasattr(candidate, "model_dump"):
+        candidate = candidate.model_dump()
+    if not isinstance(candidate, dict):
+        return {"value": str(candidate)}
+
+    rawdata = candidate.get("rawdata")
+    rawdata_dict = rawdata if isinstance(rawdata, dict) else {}
+    title = str(rawdata_dict.get("title") or candidate.get("title") or "").strip()
+    return {
+        "id": candidate.get("id"),
+        "product_id": candidate.get("product_id"),
+        "platform": candidate.get("platform"),
+        "title": title,
+        "status": candidate.get("status"),
+        "locked_at": candidate.get("locked_at"),
+        "locked_by": candidate.get("locked_by"),
+        "rawdata_keys": sorted(str(key) for key in rawdata_dict.keys()),
+    }
 
 
 def _safe_filename(value: str, max_length: int = 120) -> str:

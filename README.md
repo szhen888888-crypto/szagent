@@ -108,9 +108,9 @@ data/products/<platform>/<product_id>/main_image_collage.jpg
 workflow-logs/<product_name>__<platform>__<product_id>.log
 ```
 
-工作流启动时会先创建临时运行日志；一旦选中产品，会使用产品名称、平台和产品 ID 重命名日志文件，避免同名产品覆盖。日志路径会写入返回结果的 `metrics.workflow_log_path`。日志记录 `workflow_start` / `workflow_end`、每个节点的 `node_start` / `node_end`、异常时的 `node_error` / `workflow_error`，以及尺寸检测后的 `branch_decision`。
+工作流启动时会先创建临时运行日志；一旦选中产品，会使用产品名称、平台和产品 ID 重命名日志文件，避免同名产品覆盖。日志路径会写入返回结果的 `metrics.workflow_log_path`。日志记录 `workflow_start` / `workflow_end`、每个节点的 `node_start` / `node_end`、异常时的 `node_error` / `workflow_error`，以及尺寸检测后的 `branch_decision`。每个逻辑单元都会带中文说明，解释该节点在流程中的作用。
 
-节点日志以中文文本记录输入数据、输出数据、状态记忆摘要、状态写回逻辑，以及 `status`、`reason`、`cache`、`can_judge_size`、图片编号、选中模特、Enroute 参考图路径等关键判断字段。LLM 和图片 AI 调用会额外记录原始输入与原始输出，包括 prompt、请求参数、图片输入路径/URL、模型原始响应文本或接口原始响应 JSON。日志目录可通过 `PRODUCTV2_WORKFLOW_LOGS_DIR` 覆盖，默认不纳入 Git。
+节点日志以中文文本记录输入数据、输出数据、状态记忆摘要、状态写回逻辑，以及 `status`、`reason`、`cache`、`can_judge_size`、图片编号、选中模特、Enroute 参考图路径等关键判断字段。候选产品 `candidates` 只记录数量、产品 ID、平台、标题、状态、锁信息和 rawdata 字段名，不记录完整 rawdata。LLM 和图片 AI 调用会额外记录原始输入与原始输出，包括 prompt、请求参数、图片输入路径/URL、模型原始响应文本或接口原始响应 JSON。日志目录可通过 `PRODUCTV2_WORKFLOW_LOGS_DIR` 覆盖，默认不纳入 Git。
 
 ## LLM 配置
 
