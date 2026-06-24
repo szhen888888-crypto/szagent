@@ -1,7 +1,7 @@
 productv2
 =========
 
-基于 LangChain/LangGraph 的商品上架系统骨架，使用仓库内候选商品数据生成上架草稿。
+基于 LangChain/LangGraph 的商品上架系统骨架，启动时扫描原始 JSON 目录入库，并从 SQLite 中选择待处理商品。
 
 ## 环境初始化
 
@@ -55,10 +55,13 @@ uv run productv2 reset-db
 
 - `status` 写入 `all_pendding`
 - 五个图片字段保持默认空字符串
+- 文件夹中的所有 JSON 都会逐个纳入导入处理
 - 每个 JSON 文件完整导入成功后会删除该 JSON 文件
 - 导入失败的 JSON 文件会保留在原目录，方便修复后重试
 
 原始数据目录可通过 `PRODUCTV2_RAW_DATA_DIR` 或 `--raw-data-dir` 覆盖。
+
+默认主流程不读取固定候选 JSON 文件；它只从 SQLite 选择待处理产品。`--data-path` 仅用于显式调试工作流或 `init-db --seed-candidates` 手动导入。
 
 `products` 表以 `product_id + platform` 作为组合唯一键，图片字段默认空字符串：
 

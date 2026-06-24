@@ -58,9 +58,8 @@ def test_listing_workflow_builds_drafts_from_candidate_data(tmp_path) -> None:
     assert "事件：工作流结束" in log_text
 
 
-def test_listing_workflow_falls_back_to_database_when_json_missing(tmp_path) -> None:
+def test_listing_workflow_uses_database_when_no_data_path(tmp_path) -> None:
     database_path = tmp_path / "productv2.db"
-    missing_data_path = tmp_path / "missing.json"
 
     from productv2.db import seed_candidate_products
 
@@ -83,11 +82,7 @@ def test_listing_workflow_falls_back_to_database_when_json_missing(tmp_path) -> 
     )
     seed_candidate_products(database_path=database_path, data_path=data_path)
 
-    result = run_listing_workflow(
-        data_path=missing_data_path,
-        database_path=database_path,
-        limit=1,
-    )
+    result = run_listing_workflow(database_path=database_path, limit=1)
 
     assert result["metrics"]["candidate_source"] == "database_adapter_selection"
     assert result["metrics"]["candidate_count"] == 1
@@ -99,12 +94,22 @@ def test_listing_workflow_falls_back_to_database_when_json_missing(tmp_path) -> 
     assert result["drafts"][0]["product_id"] == "db-fixture-1"
 
 
+def test_listing_workflow_rejects_explicit_missing_data_path(tmp_path) -> None:
+    missing_data_path = tmp_path / "missing.json"
+
+    try:
+        run_listing_workflow(data_path=missing_data_path, database_path=tmp_path / "db.sqlite")
+    except FileNotFoundError as exc:
+        assert str(missing_data_path) in str(exc)
+    else:
+        raise AssertionError("Expected missing explicit data_path to fail")
+
+
 def test_listing_workflow_merges_main_images_without_updating_database(
     monkeypatch,
     tmp_path,
 ) -> None:
     database_path = tmp_path / "productv2.db"
-    missing_data_path = tmp_path / "missing.json"
     assets_dir = tmp_path / "products"
     log_dir = tmp_path / "logs"
     model_profiles_dir = tmp_path / "model_profiles"
@@ -252,7 +257,6 @@ def test_listing_workflow_merges_main_images_without_updating_database(
     )
 
     result = run_listing_workflow(
-        data_path=missing_data_path,
         database_path=database_path,
         product_assets_dir=assets_dir,
         model_profiles_dir=model_profiles_dir,
@@ -437,7 +441,6 @@ def test_listing_workflow_marks_llm_failure_and_reselects_next_product(
     tmp_path,
 ) -> None:
     database_path = tmp_path / "productv2.db"
-    missing_data_path = tmp_path / "missing.json"
     assets_dir = tmp_path / "products"
 
     from productv2.db import init_database
@@ -579,7 +582,6 @@ def test_listing_workflow_marks_llm_failure_and_reselects_next_product(
     )
 
     result = run_listing_workflow(
-        data_path=missing_data_path,
         database_path=database_path,
         product_assets_dir=assets_dir,
         limit=1,
@@ -649,7 +651,6 @@ def test_listing_workflow_uses_cached_enroute_analysis(
     tmp_path,
 ) -> None:
     database_path = tmp_path / "productv2.db"
-    missing_data_path = tmp_path / "missing.json"
     assets_dir = tmp_path / "products"
 
     from productv2.db import seed_candidate_products
@@ -768,7 +769,6 @@ def test_listing_workflow_uses_cached_enroute_analysis(
     )
 
     result = run_listing_workflow(
-        data_path=missing_data_path,
         database_path=database_path,
         product_assets_dir=assets_dir,
         limit=1,

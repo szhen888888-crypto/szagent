@@ -144,10 +144,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     limit = None if args.all else args.limit
-    data_path = args.data_path or settings.productv2_data_path
-
     result = run_listing_workflow(
-        data_path=data_path,
+        data_path=args.data_path,
         database_path=database_path,
         product_assets_dir=settings.productv2_product_assets_dir,
         enroute_bestsellers_dir=settings.productv2_enroute_bestsellers_dir,

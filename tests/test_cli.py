@@ -5,6 +5,67 @@ from productv2.cli import main
 from productv2.db import RAW_IMPORT_STATUS, init_database
 
 
+def test_run_cli_imports_all_raw_json_files_and_uses_database_selection(
+    capsys,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "productv2.db"
+    raw_data_dir = tmp_path / "raw"
+    raw_data_dir.mkdir()
+    for index in (1, 2):
+        (raw_data_dir / f"batch-{index}.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "product_id": f"raw-{index}",
+                        "platform": "1688",
+                        "rawdata": {"title": f"Raw Product {index}"},
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    calls = []
+
+    def fake_run_listing_workflow(**kwargs):
+        calls.append(kwargs)
+        return {
+            "metrics": {"candidate_source": "database_adapter_selection"},
+            "drafts": [],
+        }
+
+    monkeypatch.setattr("productv2.cli.run_listing_workflow", fake_run_listing_workflow)
+
+    main(
+        [
+            "--database-path",
+            str(database_path),
+            "--raw-data-dir",
+            str(raw_data_dir),
+            "run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    metrics = json.loads(output.split("\n[]\n", 1)[0])
+    assert metrics["raw_import"]["files_scanned"] == 2
+    assert metrics["raw_import"]["files_imported"] == 2
+    assert metrics["raw_import"]["products_imported"] == 2
+    assert not list(raw_data_dir.glob("*.json"))
+    assert calls[0]["data_path"] is None
+    assert calls[0]["database_path"] == database_path
+
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT product_id, status FROM products ORDER BY product_id"
+        ).fetchall()
+
+    assert rows == [("raw-1", RAW_IMPORT_STATUS), ("raw-2", RAW_IMPORT_STATUS)]
+
+
 def test_reset_db_cli_accepts_global_database_path_before_subcommand(
     capsys,
     tmp_path,

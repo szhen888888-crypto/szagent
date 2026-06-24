@@ -41,7 +41,7 @@ from productv2.workflow_logging import (
 
 
 class ListingWorkflowState(TypedDict, total=False):
-    data_path: str
+    data_path: str | None
     database_path: str
     product_assets_dir: str
     enroute_bestsellers_dir: str
@@ -63,9 +63,11 @@ def _load_candidates(
     state: ListingWorkflowState,
     logger: WorkflowRunLogger | None = None,
 ) -> ListingWorkflowState:
-    data_path = state.get("data_path") or str(DEFAULT_CANDIDATE_DATA)
-    path = Path(data_path)
-    if path.exists():
+    data_path = state.get("data_path")
+    if data_path:
+        path = Path(data_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Candidate data file not found: {path}")
         candidates = load_candidate_products(
             data_path=path,
             limit=state.get("limit"),
@@ -575,7 +577,7 @@ def _kwargs_with_optional_logger(
 
 
 def run_listing_workflow(
-    data_path: str | Path = DEFAULT_CANDIDATE_DATA,
+    data_path: str | Path | None = None,
     database_path: str | Path = DEFAULT_DATABASE_PATH,
     product_assets_dir: str | Path = DEFAULT_PRODUCT_ASSETS_DIR,
     enroute_bestsellers_dir: str | Path = DEFAULT_ENROUTE_BESTSELLERS_DIR,
@@ -592,7 +594,8 @@ def run_listing_workflow(
     logger.write(
         "workflow_start",
         data={
-            "data_path": str(data_path),
+            "candidate_source_mode": "json_file" if data_path is not None else "database",
+            **({"data_path": str(data_path)} if data_path is not None else {}),
             "database_path": str(database_path),
             "product_assets_dir": str(product_assets_dir),
             "enroute_bestsellers_dir": str(enroute_bestsellers_dir),
@@ -605,7 +608,7 @@ def run_listing_workflow(
     try:
         result = graph.invoke(
             {
-                "data_path": str(data_path),
+                "data_path": str(data_path) if data_path is not None else None,
                 "database_path": str(database_path),
                 "product_assets_dir": str(product_assets_dir),
                 "enroute_bestsellers_dir": str(enroute_bestsellers_dir),

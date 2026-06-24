@@ -17,7 +17,7 @@
 - `pyproject.toml`：uv/Python 项目元数据、依赖声明和命令行入口配置。
 - `uv.lock`：uv 生成的依赖锁文件，保证环境可复现。
 - `.python-version`：uv 选定的项目 Python 版本。
-- `.env.example`：本地环境变量示例，包含候选商品数据路径和 LLM 配置占位。
+- `.env.example`：本地环境变量示例，包含原始数据目录、数据库路径和 LLM 配置占位。
 - `.gitignore`：本地虚拟环境、缓存、密钥文件和构建产物忽略规则。
 - `data/productv2.db`：本地 SQLite 数据库文件，由 `uv run productv2 init-db` 生成，默认不纳入版本管理。
 - `data/raw/`：原始 JSON 数据投递目录。程序启动时先扫描该目录，成功导入数据库后删除已导入 JSON 文件。
@@ -25,7 +25,7 @@
 - `data/model_profiles/`：固定虚拟模特三视图图片目录，默认不纳入版本管理；启动工作流时同步写入 SQLite `model_profiles` 表。
 - `workflow-logs/`：每次工作流运行的独立中文 `.log` 日志目录，记录节点输入、输出、状态记忆、判断结果、分支选择以及 AI 原始输入输出，默认不纳入版本管理。
 - `enroute-bestsellers/`：离线采集的 Enroute best-selling 参考图片库，默认不纳入版本管理。
-- `inyourday-candidate-products-site-raw-20260622.json`：候选商品原始数据，是商品上架流程的当前输入数据源。
+- `inyourday-candidate-products-site-raw-20260622.json`：历史候选商品原始数据文件，可用于 `init-db --seed-candidates --data-path ...` 手动导入；默认主流程不直接读取该文件。
 - `src/productv2/__init__.py`：Python 包入口，导出 CLI `main`。
 - `src/productv2/adapters/`：平台适配器目录，按平台名放置适配器模块；当前内置 `1688.py`。
 - `src/productv2/cli.py`：命令行入口，支持运行工作流、初始化 SQLite 数据库、导入候选商品数据。
@@ -50,7 +50,7 @@
 
 默认数据库路径：`data/productv2.db`。
 
-默认原始数据目录：`data/raw/`。程序启动时先扫描 `*.json`，成功导入的文件会被删除；导入状态写入 `all_pendding`，图片字段初始为空字符串。
+默认原始数据目录：`data/raw/`。程序启动时先扫描该文件夹下所有 `*.json`，逐个导入数据库；每个 JSON 文件完整导入成功后会被删除。导入状态写入 `all_pendding`，图片字段初始为空字符串。默认主流程不读取固定候选 JSON 文件，只从 SQLite 选择待处理产品。
 
 使用 `uv run productv2 reset-db` 可将 `products` 表恢复到初始待处理状态：所有产品 `status` 写回 `all_pendding`，五个图片字段写回空字符串，`locked_at` / `locked_by` 清空。该命令不扫描或导入 `data/raw/`，也不清空 Enroute 逆向分析缓存和模特 profile 表。
 
@@ -101,7 +101,7 @@
 
 每次调用 `run_listing_workflow()` 都会创建一个独立日志文件，默认位于 `workflow-logs/<product_name>__<platform>__<product_id>.log`。工作流启动时先创建临时运行日志；一旦选中产品，会使用产品名称、平台和产品 ID 重命名日志文件，避免同名产品覆盖，最终路径会写入 `metrics.workflow_log_path`。日志事件包括 `workflow_start`、每个节点的 `node_start` / `node_end`、异常时的 `node_error` / `workflow_error`、以及尺寸检测后的 `branch_decision`。节点日志以中文可读文本记录输入 state、输出 state、状态记忆摘要、状态写回逻辑，并抽取 `status`、`reason`、`cache`、`can_judge_size`、图片编号、选中模特、Enroute 参考图路径等关键判断字段。LLM 和图片 AI 调用必须记录原始输入与原始输出，包括 prompt、请求参数、图片输入路径/URL、模型原始响应文本或接口原始响应 JSON。日志是排查用运行产物，不写入数据库，不纳入 Git。
 
-当候选商品 JSON 不存在时，`load_candidates` 会从 SQLite 读取所有未完成且未加锁商品到内存，随机打乱后逐条检查 `src/productv2/adapters/` 是否存在平台适配器；没有适配器则跳过，直到选中一条商品。默认完成状态：`done`、`completed`、`published`；`locked_at` 不为空表示正在处理中，会被过滤。
+`load_candidates` 默认从 SQLite 读取所有未完成且未加锁商品到内存，随机打乱后逐条检查 `src/productv2/adapters/` 是否存在平台适配器；没有适配器则跳过，直到选中一条商品。显式传入 `data_path` 时才会读取单个 JSON 文件作为调试入口；默认完成状态：`done`、`completed`、`published`；`locked_at` 不为空表示正在处理中，会被过滤。
 
 选中商品后，系统会立刻写入 `locked_at` / `locked_by` 并将 `status` 更新为 `processing`，然后使用数据库整行数据初始化进程内全局 state。后续流程通过 `productv2.state.get_current_product()` 读取当前商品；通过 `set_status()` 和 `set_image()` 更新真实状态或图片字段时，必须同步写回 SQLite。临时流程数据使用 `set_extra()` / `get_extra()`，不要硬加入数据库字段或 `CandidateProduct` 字段。
 
