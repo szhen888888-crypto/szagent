@@ -1,0 +1,17 @@
+.venv/
+.env
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+data/*.sqlite
+data/*.sqlite3
+data/*.db
+data/raw/*.json
+data/products/
+data/model_profiles/
+/enroute-bestsellers/
