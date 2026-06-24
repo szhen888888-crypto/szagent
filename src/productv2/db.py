@@ -408,6 +408,40 @@ def update_product_fields(
     return product
 
 
+def reset_products_for_processing(
+    database_path: str | Path = DEFAULT_DATABASE_PATH,
+    status: str = RAW_IMPORT_STATUS,
+) -> dict[str, Any]:
+    """Reset product rows to the initial processable state."""
+
+    init_database(database_path)
+    with connect_database(database_path) as connection:
+        total_count = connection.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        connection.execute(
+            """
+            UPDATE products
+            SET status = ?,
+                main_image = '',
+                wearing_image = '',
+                detail_image = '',
+                size_ratio_image = '',
+                multi_angle_image = '',
+                locked_at = NULL,
+                locked_by = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (status,),
+        )
+
+    return {
+        "database_path": str(database_path),
+        "products_reset": int(total_count),
+        "status": status,
+        "images_cleared": True,
+        "locks_cleared": True,
+    }
+
+
 def get_enroute_image_analysis(
     database_path: str | Path,
     enroute_product_id: str,

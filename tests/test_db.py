@@ -11,6 +11,7 @@ from productv2.db import (
     load_model_profiles,
     load_products_from_database,
     load_unfinished_products_from_database,
+    reset_products_for_processing,
     seed_candidate_products,
     sync_default_model_profiles,
     upsert_enroute_image_analysis,
@@ -282,6 +283,60 @@ def test_load_unfinished_products_filters_completed_and_locked_statuses(tmp_path
     products = load_unfinished_products_from_database(database_path=database_path)
 
     assert [product.product_id for product in products] == ["p-1", "p-2"]
+
+
+def test_reset_products_for_processing_clears_status_images_and_locks(tmp_path) -> None:
+    database_path = tmp_path / "productv2.db"
+    init_database(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO products (
+                product_id, platform, rawdata, status, main_image, wearing_image,
+                detail_image, size_ratio_image, multi_angle_image, locked_at, locked_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "p-reset",
+                "1688",
+                "{}",
+                "processing",
+                "/tmp/main.jpg",
+                "/tmp/wearing.jpg",
+                "/tmp/detail.jpg",
+                "/tmp/size.jpg",
+                "/tmp/multi.jpg",
+                "2026-06-24T00:00:00",
+                "worker-1",
+            ),
+        )
+
+    summary = reset_products_for_processing(database_path)
+
+    assert summary["products_reset"] == 1
+    assert summary["status"] == RAW_IMPORT_STATUS
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT status, main_image, wearing_image, detail_image,
+                   size_ratio_image, multi_angle_image, locked_at, locked_by
+            FROM products
+            WHERE product_id = ? AND platform = ?
+            """,
+            ("p-reset", "1688"),
+        ).fetchone()
+
+    assert row["status"] == RAW_IMPORT_STATUS
+    assert row["main_image"] == ""
+    assert row["wearing_image"] == ""
+    assert row["detail_image"] == ""
+    assert row["size_ratio_image"] == ""
+    assert row["multi_angle_image"] == ""
+    assert row["locked_at"] is None
+    assert row["locked_by"] is None
 
 
 def test_import_raw_data_directory_imports_and_deletes_json_files(tmp_path) -> None:

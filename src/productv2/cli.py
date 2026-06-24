@@ -8,36 +8,48 @@ from pathlib import Path
 from typing import Sequence
 
 from productv2.config import Settings
-from productv2.db import import_raw_data_directory, init_database, seed_candidate_products
+from productv2.db import (
+    RAW_IMPORT_STATUS,
+    import_raw_data_directory,
+    init_database,
+    reset_products_for_processing,
+    seed_candidate_products,
+)
 from productv2.graph import run_listing_workflow
 
 
-def add_startup_arguments(parser: argparse.ArgumentParser) -> None:
+def add_startup_arguments(
+    parser: argparse.ArgumentParser,
+    default=argparse.SUPPRESS,
+) -> None:
     parser.add_argument(
         "--database-path",
         type=Path,
-        default=None,
+        default=default,
         help="Path to the SQLite database file.",
     )
     parser.add_argument(
         "--raw-data-dir",
         type=Path,
-        default=None,
+        default=default,
         help="Directory to scan for raw JSON files before running.",
     )
 
 
-def add_workflow_arguments(parser: argparse.ArgumentParser) -> None:
+def add_workflow_arguments(
+    parser: argparse.ArgumentParser,
+    default=argparse.SUPPRESS,
+) -> None:
     parser.add_argument(
         "--data-path",
         type=Path,
-        default=None,
+        default=default,
         help="Path to candidate product JSON data.",
     )
     parser.add_argument(
         "--limit",
         type=int,
-        default=None,
+        default=default,
         help="Maximum number of candidate products to process.",
     )
     parser.add_argument(
@@ -52,8 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="productv2",
         description="Run the LangGraph product listing draft workflow.",
     )
-    add_startup_arguments(parser)
-    add_workflow_arguments(parser)
+    add_startup_arguments(parser, default=None)
+    add_workflow_arguments(parser, default=None)
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -75,6 +87,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seed products from the candidate product JSON data.",
     )
     add_workflow_arguments(init_db_parser)
+
+    reset_db_parser = subparsers.add_parser(
+        "reset-db",
+        help="Reset product rows to the initial processable state.",
+    )
+    add_startup_arguments(reset_db_parser)
+    reset_db_parser.add_argument(
+        "--status",
+        default=RAW_IMPORT_STATUS,
+        help="Status to write to every product row after reset.",
+    )
     return parser
 
 
@@ -82,6 +105,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     settings = Settings()
     database_path = args.database_path or settings.productv2_database_path
+    if args.command == "reset-db":
+        summary = reset_products_for_processing(
+            database_path=database_path,
+            status=args.status,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
     raw_import_summary = import_raw_data_directory(
         database_path=database_path,
         raw_data_dir=args.raw_data_dir or settings.productv2_raw_data_dir,

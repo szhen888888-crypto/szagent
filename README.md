@@ -41,6 +41,14 @@ uv run productv2 init-db --seed-candidates --all
 
 默认数据库路径为 `data/productv2.db`，可通过 `PRODUCTV2_DATABASE_PATH` 或 `--database-path` 覆盖。
 
+重置现有产品数据到初始待处理状态：
+
+```bash
+uv run productv2 reset-db
+```
+
+该命令只重置 `products` 表：`status` 写回 `all_pendding`、清空五个图片字段、清空 `locked_at` / `locked_by`。它不会扫描或导入 `data/raw`，也不会清空 Enroute 逆向分析缓存和模特 profile 表。
+
 ## 原始数据目录
 
 程序启动时会先扫描 `data/raw` 下的 `*.json` 文件。扫描到数据后会导入 `products` 表：

@@ -52,6 +52,8 @@
 
 默认原始数据目录：`data/raw/`。程序启动时先扫描 `*.json`，成功导入的文件会被删除；导入状态写入 `all_pendding`，图片字段初始为空字符串。
 
+使用 `uv run productv2 reset-db` 可将 `products` 表恢复到初始待处理状态：所有产品 `status` 写回 `all_pendding`，五个图片字段写回空字符串，`locked_at` / `locked_by` 清空。该命令不扫描或导入 `data/raw/`，也不清空 Enroute 逆向分析缓存和模特 profile 表。
+
 `products` 表字段：
 
 - `id`：自增主键。
@@ -118,6 +120,7 @@ Grsai 图片生成组件是工具能力，不是主流程本身。
 - 使用 `uv add` / `uv remove` 管理依赖，不手写锁文件。
 - 使用 `uv run productv2 --limit N` 验证工作流入口。
 - 使用 `uv run productv2 init-db --seed-candidates --all` 初始化 SQLite 并导入当前候选商品数据。
+- 使用 `uv run productv2 reset-db` 将现有产品数据恢复为待处理初始状态。
 - 将待导入原始 JSON 放入 `data/raw/` 后，任意 `uv run productv2 ...` 启动都会先导入该目录数据。
 - 使用 `uv run python tools/enroute-bestsellers/download.py` 离线采集 Enroute 参考图库。
 - 使用 `uv run pytest` 验证测试。
