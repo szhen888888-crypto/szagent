@@ -23,6 +23,7 @@
 - `data/raw/`：原始 JSON 数据投递目录。程序启动时先扫描该目录，成功导入数据库后删除已导入 JSON 文件。
 - `data/products/`：产品处理产物目录，例如主图合并图，默认不纳入版本管理。
 - `data/model_profiles/`：固定虚拟模特三视图图片目录，默认不纳入版本管理；启动工作流时同步写入 SQLite `model_profiles` 表。
+- `data/logs/`：每次工作流运行的独立 JSONL 日志目录，记录节点输入、输出、判断结果和分支选择，默认不纳入版本管理。
 - `enroute-bestsellers/`：离线采集的 Enroute best-selling 参考图片库，默认不纳入版本管理。
 - `inyourday-candidate-products-site-raw-20260622.json`：候选商品原始数据，是商品上架流程的当前输入数据源。
 - `src/productv2/__init__.py`：Python 包入口，导出 CLI `main`。
@@ -39,6 +40,7 @@
 - `src/productv2/selection.py`：从数据库读取未完成商品，在内存中随机选择有平台适配器的商品。
 - `src/productv2/state.py`：进程内全局产品 state。核心 product 字段与数据库 `products` 表保持一致；临时流程数据放入 state extras，不硬塞入数据库字段。更新真实图片和状态字段时同步写回 SQLite。
 - `src/productv2/graph.py`：LangGraph 商品上架草稿工作流，当前包含加载候选商品、生成草稿、准备人工复核队列。
+- `src/productv2/workflow_logging.py`：每次工作流运行的 JSONL 日志组件，负责记录节点输入/输出、异常、关键判断字段和条件分支。
 - `tools/enroute-bestsellers/download.py`：离线下载 Enroute best-selling 参考图库。访问 `collections/<category>/products.json`，默认四类 `earrings`、`bracelets`、`necklaces`、`rings`，按 `sort_by=best-selling` 下载产品图，每类目标约 60 张、最多 70 张。
 - `tests/test_adapters.py`：平台适配器发现和随机选择逻辑测试。
 - `tests/test_db.py`：SQLite 表结构、唯一键、图片默认值和候选商品导入测试。
@@ -94,6 +96,8 @@
 ## 当前工作流
 
 当前主流程聚焦商品图片处理，不把上架草稿生成视为核心目标。旧的 `ListingDraft` 代码仍存在，但不是当前图片处理主流程的完成标准。
+
+每次调用 `run_listing_workflow()` 都会创建一个独立日志文件，默认位于 `data/logs/<run_id>.jsonl`，最终路径会写入 `metrics.workflow_log_path`。日志事件包括 `workflow_start`、每个节点的 `node_start` / `node_end`、异常时的 `node_error` / `workflow_error`、以及尺寸检测后的 `branch_decision`。节点日志记录输入 state、输出 state，并抽取 `status`、`reason`、`cache`、`can_judge_size`、图片编号、选中模特、Enroute 参考图路径等关键判断字段。日志是排查用运行产物，不写入数据库，不纳入 Git。
 
 当候选商品 JSON 不存在时，`load_candidates` 会从 SQLite 读取所有未完成且未加锁商品到内存，随机打乱后逐条检查 `src/productv2/adapters/` 是否存在平台适配器；没有适配器则跳过，直到选中一条商品。默认完成状态：`done`、`completed`、`published`；`locked_at` 不为空表示正在处理中，会被过滤。
 

@@ -14,6 +14,7 @@ from productv2.config import (
     DEFAULT_ENROUTE_BESTSELLERS_DIR,
     DEFAULT_MODEL_PROFILES_DIR,
     DEFAULT_PRODUCT_ASSETS_DIR,
+    DEFAULT_WORKFLOW_LOGS_DIR,
 )
 from productv2.data import load_candidate_products
 from productv2.db import (
@@ -30,6 +31,12 @@ from productv2.selection import select_unfinished_product_with_adapter
 from productv2.state import initialize_product_state, mark_failed, set_extra
 from productv2.vision import detect_size_reference_images
 from productv2.wearing import generate_wearing_image
+from productv2.workflow_logging import (
+    WorkflowRunLogger,
+    create_workflow_logger,
+    log_branch_decision,
+    wrap_node_with_logging,
+)
 
 
 class ListingWorkflowState(TypedDict, total=False):
@@ -38,6 +45,7 @@ class ListingWorkflowState(TypedDict, total=False):
     product_assets_dir: str
     enroute_bestsellers_dir: str
     model_profiles_dir: str
+    workflow_log_path: str
     limit: int | None
     candidates: list[dict[str, Any]]
     drafts: list[dict[str, Any]]
@@ -201,12 +209,19 @@ def _detect_size_reference(state: ListingWorkflowState) -> ListingWorkflowState:
     return {"size_reference_result": size_reference_result}
 
 
-def _size_reference_next_step(state: ListingWorkflowState) -> str:
+def _size_reference_next_step(
+    state: ListingWorkflowState,
+    logger: WorkflowRunLogger | None = None,
+) -> str:
     if state.get("size_reference_result", {}).get("status") == "failed":
-        return "retry_load_candidates"
-    if state.get("size_reference_result", {}).get("status") == "ok":
-        return "select_enroute_reference"
-    return "build_listing_drafts"
+        branch = "retry_load_candidates"
+    elif state.get("size_reference_result", {}).get("status") == "ok":
+        branch = "select_enroute_reference"
+    else:
+        branch = "build_listing_drafts"
+    if logger is not None:
+        log_branch_decision(logger, "detect_size_reference", branch, state)
+    return branch
 
 
 def _selected_product_images(
@@ -412,6 +427,8 @@ def _prepare_review_queue(state: ListingWorkflowState) -> ListingWorkflowState:
         existing_metrics["enroute_analysis_result"] = state["enroute_analysis_result"]
     if state.get("wearing_image_result"):
         existing_metrics["wearing_image_result"] = state["wearing_image_result"]
+    if state.get("workflow_log_path"):
+        existing_metrics["workflow_log_path"] = state["workflow_log_path"]
     existing_metrics.update(
         {
             "draft_count": len(drafts),
@@ -426,23 +443,41 @@ def _prepare_review_queue(state: ListingWorkflowState) -> ListingWorkflowState:
     }
 
 
-def build_listing_graph():
+def build_listing_graph(logger: WorkflowRunLogger | None = None):
     workflow = StateGraph(ListingWorkflowState)
-    workflow.add_node("load_candidates", _load_candidates)
-    workflow.add_node("merge_main_images", _merge_main_images)
-    workflow.add_node("detect_size_reference", _detect_size_reference)
-    workflow.add_node("select_enroute_reference", _select_enroute_reference)
-    workflow.add_node("analyze_enroute_reference", _analyze_enroute_reference)
-    workflow.add_node("generate_wearing_image", _generate_wearing_image)
-    workflow.add_node("build_listing_drafts", _build_listing_drafts)
-    workflow.add_node("prepare_review_queue", _prepare_review_queue)
+    workflow.add_node("load_candidates", _node("load_candidates", _load_candidates, logger))
+    workflow.add_node("merge_main_images", _node("merge_main_images", _merge_main_images, logger))
+    workflow.add_node(
+        "detect_size_reference",
+        _node("detect_size_reference", _detect_size_reference, logger),
+    )
+    workflow.add_node(
+        "select_enroute_reference",
+        _node("select_enroute_reference", _select_enroute_reference, logger),
+    )
+    workflow.add_node(
+        "analyze_enroute_reference",
+        _node("analyze_enroute_reference", _analyze_enroute_reference, logger),
+    )
+    workflow.add_node(
+        "generate_wearing_image",
+        _node("generate_wearing_image", _generate_wearing_image, logger),
+    )
+    workflow.add_node(
+        "build_listing_drafts",
+        _node("build_listing_drafts", _build_listing_drafts, logger),
+    )
+    workflow.add_node(
+        "prepare_review_queue",
+        _node("prepare_review_queue", _prepare_review_queue, logger),
+    )
 
     workflow.add_edge(START, "load_candidates")
     workflow.add_edge("load_candidates", "merge_main_images")
     workflow.add_edge("merge_main_images", "detect_size_reference")
     workflow.add_conditional_edges(
         "detect_size_reference",
-        _size_reference_next_step,
+        lambda state: _size_reference_next_step(state, logger),
         {
             "retry_load_candidates": "load_candidates",
             "select_enroute_reference": "select_enroute_reference",
@@ -458,23 +493,64 @@ def build_listing_graph():
     return workflow.compile()
 
 
+def _node(
+    node_name: str,
+    func,
+    logger: WorkflowRunLogger | None,
+):
+    if logger is None:
+        return func
+    return wrap_node_with_logging(node_name, func, logger)
+
+
 def run_listing_workflow(
     data_path: str | Path = DEFAULT_CANDIDATE_DATA,
     database_path: str | Path = DEFAULT_DATABASE_PATH,
     product_assets_dir: str | Path = DEFAULT_PRODUCT_ASSETS_DIR,
     enroute_bestsellers_dir: str | Path = DEFAULT_ENROUTE_BESTSELLERS_DIR,
     model_profiles_dir: str | Path = DEFAULT_MODEL_PROFILES_DIR,
+    workflow_logs_dir: str | Path | None = None,
     limit: int | None = 5,
 ) -> ListingWorkflowState:
     sync_default_model_profiles(database_path, model_profiles_dir)
-    graph = build_listing_graph()
-    return graph.invoke(
-        {
+    logger = create_workflow_logger(
+        workflow_logs_dir
+        if workflow_logs_dir is not None
+        else DEFAULT_WORKFLOW_LOGS_DIR
+    )
+    logger.write(
+        "workflow_start",
+        data={
             "data_path": str(data_path),
             "database_path": str(database_path),
             "product_assets_dir": str(product_assets_dir),
             "enroute_bestsellers_dir": str(enroute_bestsellers_dir),
             "model_profiles_dir": str(model_profiles_dir),
             "limit": limit,
-        }
+            "log_path": str(logger.path),
+        },
     )
+    graph = build_listing_graph(logger=logger)
+    try:
+        result = graph.invoke(
+            {
+                "data_path": str(data_path),
+                "database_path": str(database_path),
+                "product_assets_dir": str(product_assets_dir),
+                "enroute_bestsellers_dir": str(enroute_bestsellers_dir),
+                "model_profiles_dir": str(model_profiles_dir),
+                "workflow_log_path": str(logger.path),
+                "limit": limit,
+            }
+        )
+    except Exception as exc:
+        logger.write(
+            "workflow_error",
+            data={"error_type": type(exc).__name__, "error": str(exc)},
+        )
+        raise
+    logger.write(
+        "workflow_end",
+        data={"metrics": result.get("metrics", {}), "log_path": str(logger.path)},
+    )
+    return result

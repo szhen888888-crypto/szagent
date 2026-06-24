@@ -15,6 +15,7 @@ DEFAULT_RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
 DEFAULT_PRODUCT_ASSETS_DIR = PROJECT_ROOT / "data" / "products"
 DEFAULT_ENROUTE_BESTSELLERS_DIR = PROJECT_ROOT / "enroute-bestsellers"
 DEFAULT_MODEL_PROFILES_DIR = PROJECT_ROOT / "data" / "model_profiles"
+DEFAULT_WORKFLOW_LOGS_DIR = PROJECT_ROOT / "data" / "logs"
 DEFAULT_OPENAI_BASE_URL = "https://www.lynxhub.top"
 DEFAULT_OPENAI_MODEL = "gpt-5.5"
 DEFAULT_IMAGE_GENERATION_BASE_URL = "https://grsaiapi.com"
@@ -30,6 +31,7 @@ class Settings(BaseSettings):
     productv2_product_assets_dir: Path = DEFAULT_PRODUCT_ASSETS_DIR
     productv2_enroute_bestsellers_dir: Path = DEFAULT_ENROUTE_BESTSELLERS_DIR
     productv2_model_profiles_dir: Path = DEFAULT_MODEL_PROFILES_DIR
+    productv2_workflow_logs_dir: Path = DEFAULT_WORKFLOW_LOGS_DIR
     productv2_default_limit: int = 5
     openai_api_key: SecretStr | None = None
     openai_model: str = DEFAULT_OPENAI_MODEL

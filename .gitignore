@@ -14,4 +14,5 @@ data/*.db
 data/raw/*.json
 data/products/
 data/model_profiles/
+data/logs/
 /enroute-bestsellers/

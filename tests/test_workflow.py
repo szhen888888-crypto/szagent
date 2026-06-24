@@ -11,6 +11,7 @@ from productv2.state import get_extra
 
 def test_listing_workflow_builds_drafts_from_candidate_data(tmp_path) -> None:
     data_path = tmp_path / "candidates.json"
+    log_dir = tmp_path / "logs"
     data_path.write_text(
         json.dumps(
             [
@@ -36,13 +37,30 @@ def test_listing_workflow_builds_drafts_from_candidate_data(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    result = run_listing_workflow(data_path=data_path, limit=2)
+    result = run_listing_workflow(data_path=data_path, limit=2, workflow_logs_dir=log_dir)
 
     assert result["metrics"]["candidate_count"] == 2
     assert result["metrics"]["draft_count"] == 2
     assert len(result["drafts"]) == 2
     assert result["drafts"][0]["product_id"]
     assert result["drafts"][0]["title"]
+    log_path = Path(result["metrics"]["workflow_log_path"])
+    assert log_path.exists()
+    assert log_path.parent == log_dir
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[0]["event"] == "workflow_start"
+    assert any(
+        event["event"] == "node_start" and event["node"] == "load_candidates"
+        for event in events
+    )
+    assert any(
+        event["event"] == "node_end" and event["node"] == "prepare_review_queue"
+        for event in events
+    )
+    assert events[-1]["event"] == "workflow_end"
 
 
 def test_listing_workflow_falls_back_to_database_when_json_missing(tmp_path) -> None:
@@ -93,6 +111,7 @@ def test_listing_workflow_merges_main_images_without_updating_database(
     database_path = tmp_path / "productv2.db"
     missing_data_path = tmp_path / "missing.json"
     assets_dir = tmp_path / "products"
+    log_dir = tmp_path / "logs"
     model_profiles_dir = tmp_path / "model_profiles"
     model_dir = model_profiles_dir / "romantic_rebel_european"
     model_dir.mkdir(parents=True)
@@ -242,6 +261,7 @@ def test_listing_workflow_merges_main_images_without_updating_database(
         database_path=database_path,
         product_assets_dir=assets_dir,
         model_profiles_dir=model_profiles_dir,
+        workflow_logs_dir=log_dir,
         limit=1,
     )
 
@@ -318,6 +338,26 @@ def test_listing_workflow_merges_main_images_without_updating_database(
     assert result["metrics"]["enroute_analysis_result"]["analysis"][
         "selected_model_profile"
     ]["profile_key"] == "romantic_rebel_european"
+    log_path = Path(result["metrics"]["workflow_log_path"])
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        event["event"] == "branch_decision"
+        and event["node"] == "detect_size_reference"
+        and event["data"]["branch"] == "select_enroute_reference"
+        for event in events
+    )
+    assert any(
+        event["event"] == "node_end"
+        and event["node"] == "analyze_enroute_reference"
+        and event["data"]["decisions"][
+            "enroute_analysis_result.reference_image_path"
+        ]
+        == str(reference_path)
+        for event in events
+    )
     wearing_result = result["metrics"]["wearing_image_result"]
     assert wearing_result["status"] == "reserved"
     assert wearing_result["reason"] == "wearing_image_generation_not_implemented"

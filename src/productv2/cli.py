@@ -121,6 +121,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         product_assets_dir=settings.productv2_product_assets_dir,
         enroute_bestsellers_dir=settings.productv2_enroute_bestsellers_dir,
         model_profiles_dir=settings.productv2_model_profiles_dir,
+        workflow_logs_dir=settings.productv2_workflow_logs_dir,
         limit=limit if limit is not None else settings.productv2_default_limit,
     )
     result["metrics"]["raw_import"] = raw_import_summary
