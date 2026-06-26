@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from PIL import Image, ImageDraw, ImageFont
 
+from productv2.image_generation import get_image_generator, image_file_to_data_url
 from productv2.models import CandidateProduct
+from productv2.workflow_logging import WorkflowRunLogger
 
 
 def generate_wearing_image(
@@ -16,8 +21,11 @@ def generate_wearing_image(
     size_reference_result: dict[str, Any],
     enroute_analysis_result: dict[str, Any] | None = None,
     output_dir: str | Path | None = None,
+    logger: WorkflowRunLogger | None = None,
+    attempt: int = 1,
+    database_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Prepare marked references and prompt for the wearing image generation step."""
+    """Generate a wearing image from marked product references and style analysis."""
 
     selected_images = size_reference_result.get("selected_images", {})
     if not isinstance(selected_images, dict):
@@ -67,9 +75,7 @@ def generate_wearing_image(
     if selected_model_profile.get("image_path"):
         input_images.append(str(selected_model_profile["image_path"]))
 
-    return {
-        "status": "reserved",
-        "reason": "wearing_image_generation_not_implemented",
+    prepared_result = {
         "product_id": candidate.product_id,
         "platform": candidate.platform,
         "size_reference_image_numbers": size_reference_result.get("image_numbers", []),
@@ -80,6 +86,122 @@ def generate_wearing_image(
         "input_images": input_images,
         "prompt": prompt,
     }
+
+    missing_input_images = [
+        image_path for image_path in input_images if not Path(image_path).is_file()
+    ]
+    if missing_input_images:
+        raise FileNotFoundError(
+            "Wearing image generation input images are missing: "
+            + ", ".join(missing_input_images)
+        )
+
+    generator = get_image_generator(logger=logger)
+    generation_kwargs: dict[str, Any] = {
+        "prompt": prompt,
+        "images": [image_file_to_data_url(image_path) for image_path in input_images],
+        "wait": True,
+    }
+    if database_path is not None:
+        generation_kwargs["database_path"] = database_path
+    generation_result = generator.generate(**generation_kwargs)
+
+    generation_summary = {
+        "id": generation_result.id,
+        "status": generation_result.status,
+        "progress": generation_result.progress,
+        "urls": generation_result.urls,
+        "error": generation_result.error,
+    }
+    if generation_result.status.lower() not in {
+        "succeeded",
+        "success",
+        "completed",
+        "done",
+    }:
+        raise RuntimeError(
+            "Image generation did not succeed: "
+            + json.dumps(generation_summary, ensure_ascii=False)
+        )
+    if not generation_result.urls:
+        raise RuntimeError(
+            "Image generation returned no URL: "
+            + json.dumps(generation_summary, ensure_ascii=False)
+        )
+
+    generated_image_path = save_generated_wearing_image(
+        generation_result.urls[0],
+        active_output_dir,
+        attempt=attempt,
+        timeout=generator.settings.image_generation_timeout,
+    )
+
+    return {
+        **prepared_result,
+        "status": "ok",
+        "reason": "wearing_image_generated",
+        "generated_image_path": str(generated_image_path),
+        "generated_image_url": generation_result.urls[0],
+        "image_generation": generation_summary,
+        "attempt": attempt,
+    }
+
+
+def save_generated_wearing_image(
+    image_url: str,
+    output_dir: str | Path,
+    attempt: int = 1,
+    timeout: float | None = 600.0,
+) -> Path:
+    """Save one generated wearing image to the product asset directory."""
+
+    active_output_dir = Path(output_dir)
+    active_output_dir.mkdir(parents=True, exist_ok=True)
+
+    image_bytes, suffix = _read_generated_image(image_url, timeout=timeout)
+    output_stem = f"wearing_image_attempt_{max(1, attempt)}"
+    for stale_path in active_output_dir.glob(f"{output_stem}.*"):
+        if stale_path.is_file():
+            stale_path.unlink()
+    output_path = active_output_dir / f"{output_stem}{suffix}"
+    output_path.write_bytes(image_bytes)
+    return output_path
+
+
+def _read_generated_image(
+    image_url: str,
+    timeout: float | None,
+) -> tuple[bytes, str]:
+    if image_url.startswith("data:image/") and ";base64," in image_url:
+        header, encoded = image_url.split(";base64,", 1)
+        mime_type = header.removeprefix("data:")
+        return base64.b64decode(encoded), _suffix_for_mime_type(mime_type)
+
+    response = httpx.get(image_url, timeout=timeout, follow_redirects=True)
+    response.raise_for_status()
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
+    suffix = _suffix_for_mime_type(content_type)
+    if suffix == ".jpg":
+        suffix = _suffix_from_url(image_url) or suffix
+    return response.content, suffix
+
+
+def _suffix_for_mime_type(mime_type: str) -> str:
+    normalized = mime_type.lower()
+    if normalized == "image/png":
+        return ".png"
+    if normalized == "image/webp":
+        return ".webp"
+    if normalized in {"image/jpeg", "image/jpg"}:
+        return ".jpg"
+    return ".jpg"
+
+
+def _suffix_from_url(image_url: str) -> str:
+    suffix = Path(urlparse(image_url).path).suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".webp"}:
+        return ".jpg" if suffix == ".jpeg" else suffix
+    return ""
 
 
 def create_labeled_reference_image(

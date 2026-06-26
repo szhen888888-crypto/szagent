@@ -1,0 +1,9 @@
+{
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "product_listing": "./src/productv2/dev_graph.py:product_listing"
+  },
+  "env": ".env"
+}

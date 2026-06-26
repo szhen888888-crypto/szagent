@@ -5,15 +5,19 @@ import pytest
 
 from productv2.db import (
     RAW_IMPORT_STATUS,
+    acquire_ai_call_lock,
+    get_ai_call_lock,
     get_enroute_image_analysis,
     import_raw_data_directory,
     init_database,
     load_model_profiles,
     load_products_from_database,
     load_unfinished_products_from_database,
+    reset_ai_call_locks,
     reset_products_for_processing,
     seed_candidate_products,
     sync_default_model_profiles,
+    update_ai_call_lock_result,
     upsert_enroute_image_analysis,
     upsert_model_profile,
 )
@@ -138,6 +142,81 @@ def test_init_database_creates_model_profiles_table(tmp_path) -> None:
     assert columns["profile_key"]["notnull"] == 1
     assert columns["summary"]["notnull"] == 1
     assert columns["image_path"]["notnull"] == 1
+
+
+def test_ai_call_locks_acquire_reuse_and_reset(tmp_path) -> None:
+    database_path = tmp_path / "productv2.db"
+
+    first = acquire_ai_call_lock(
+        database_path,
+        call_key="llm:test",
+        call_type="llm",
+        request={"prompt": "hello"},
+        owner="worker-1",
+    )
+    second = acquire_ai_call_lock(
+        database_path,
+        call_key="llm:test",
+        call_type="llm",
+        request={"prompt": "hello"},
+        owner="worker-2",
+    )
+
+    assert first["acquired"] is True
+    assert second["acquired"] is False
+    assert second["owner"] == "worker-1"
+    assert second["status"] == "in_progress"
+
+    saved = update_ai_call_lock_result(
+        database_path,
+        call_key="llm:test",
+        status="succeeded",
+        result={"ok": True},
+    )
+
+    assert saved["status"] == "succeeded"
+    assert saved["result"] == {"ok": True}
+    assert get_ai_call_lock(database_path, "llm:test")["result"] == {"ok": True}
+
+    reset = reset_ai_call_locks(database_path)
+
+    assert reset["ai_call_locks_deleted"] == 1
+    assert get_ai_call_lock(database_path, "llm:test") is None
+
+
+def test_failed_ai_call_lock_can_be_reclaimed_for_retry(tmp_path) -> None:
+    database_path = tmp_path / "productv2.db"
+
+    first = acquire_ai_call_lock(
+        database_path,
+        call_key="llm:retry",
+        call_type="llm",
+        request={"prompt": "hello"},
+        owner="worker-1",
+    )
+    assert first["acquired"] is True
+
+    update_ai_call_lock_result(
+        database_path,
+        call_key="llm:retry",
+        status="failed",
+        result={},
+        error="HTTP 503",
+    )
+
+    retry = acquire_ai_call_lock(
+        database_path,
+        call_key="llm:retry",
+        call_type="llm",
+        request={"prompt": "hello"},
+        owner="worker-2",
+    )
+
+    assert retry["acquired"] is True
+    assert retry["reclaimed"] is True
+    assert retry["status"] == "in_progress"
+    assert retry["owner"] == "worker-2"
+    assert retry["error"] == ""
 
 
 def test_upsert_and_load_model_profiles(tmp_path) -> None:

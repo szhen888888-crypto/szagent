@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +79,11 @@ class EnrouteReferenceAnalysis(BaseModel):
     clothing_style: ClothingStyleAnalysis = Field(default_factory=ClothingStyleAnalysis)
     scene_style: SceneStyleAnalysis = Field(default_factory=SceneStyleAnalysis)
     shooting_style: ShootingStyleAnalysis = Field(default_factory=ShootingStyleAnalysis)
+    reason: str = ""
+
+
+class EnrouteAnalysisSelection(BaseModel):
+    selected_enroute_product_id: str = ""
     reason: str = ""
 
 
@@ -170,6 +176,30 @@ ENROUTE_REFERENCE_ANALYSIS_USER_PROMPT = """
 请分析这张佩戴参考图，按 system prompt 的规则输出 JSON。
 """.strip()
 
+ENROUTE_ANALYSIS_SELECTION_SYSTEM_PROMPT = """
+你正在从同类目 Enroute 逆向 JSON 摘要缓存中，为当前产品选择一条最适合的佩戴图风格参考。
+
+选择依据：
+- 只根据当前产品主图、当前产品尺寸参考图、以及下面的逆向 JSON 摘要列表选择。
+- 匹配重点只区分长 / 中 / 短的适配关系。
+- 不要讨论具体饰品类型，不要扩展额外维度。
+- 只能从摘要列表中的 enroute_product_id 选择一个。
+- 只输出 JSON，不要输出 Markdown，不要输出解释文本。
+
+逆向 JSON 摘要列表：
+{analysis_summaries}
+
+JSON 格式：
+{
+  "selected_enroute_product_id": "从摘要列表中选择一个 enroute_product_id",
+  "reason": "简短中文原因"
+}
+""".strip()
+
+ENROUTE_ANALYSIS_SELECTION_USER_PROMPT = """
+图 1 是当前产品主图，图 2 是当前产品尺寸参考图。请只输出选择结果 JSON。
+""".strip()
+
 DEFAULT_MODEL_PROFILE_OPTIONS = "暂无可选固定模特 profile。"
 
 
@@ -179,6 +209,7 @@ def analyze_enroute_reference_image(
     model: Any | None = None,
     model_profiles: list[dict[str, Any]] | None = None,
     logger: WorkflowRunLogger | None = None,
+    database_path: str | Path | None = None,
 ) -> EnrouteReferenceAnalysis:
     """Use OpenAI Responses streaming to reverse analyze a wearing reference."""
 
@@ -228,6 +259,7 @@ def analyze_enroute_reference_image(
         parse_enroute_reference_analysis,
         logger=logger,
         request_context="enroute_reference_analysis",
+        database_path=database_path,
     )
 
 
@@ -274,6 +306,140 @@ def build_enroute_reference_analysis_payload(
     if settings.enroute_analysis_top_p is not None:
         payload["top_p"] = settings.enroute_analysis_top_p
     return payload
+
+
+def select_enroute_analysis_from_summaries(
+    main_image_path: str | Path,
+    size_reference_image_path: str | Path,
+    analysis_summaries: list[dict[str, Any]],
+    settings: Settings | None = None,
+    model: Any | None = None,
+    logger: WorkflowRunLogger | None = None,
+    database_path: str | Path | None = None,
+) -> EnrouteAnalysisSelection:
+    """Use LLM to select one cached Enroute analysis summary for current product."""
+
+    main_path = Path(main_image_path)
+    size_path = Path(size_reference_image_path)
+    if model is not None:
+        messages = _selection_vision_messages(
+            main_path,
+            size_path,
+            analysis_summaries,
+        )
+        _log_llm_request(
+            logger,
+            context="enroute_analysis_selection_model",
+            payload={
+                "main_image_file": describe_file_for_log(main_path),
+                "size_reference_image_file": describe_file_for_log(size_path),
+                "raw_messages": messages,
+            },
+        )
+        response = model.invoke(messages)
+        text = _message_text(response)
+        _log_llm_response(
+            logger,
+            context="enroute_analysis_selection_model",
+            text=text,
+        )
+        parsed = parse_enroute_analysis_selection(text)
+        _log_llm_parsed_output(
+            logger,
+            context="enroute_analysis_selection_model",
+            parsed=parsed.model_dump(),
+        )
+        return parsed
+
+    active_settings = settings or Settings()
+    payload = build_enroute_analysis_selection_payload(
+        active_settings,
+        _image_file_to_data_url(main_path),
+        _image_file_to_data_url(size_path),
+        analysis_summaries,
+    )
+    _log_llm_request(
+        logger,
+        context="enroute_analysis_selection",
+        payload={
+            "main_image_file": describe_file_for_log(main_path),
+            "size_reference_image_file": describe_file_for_log(size_path),
+            "raw_payload": payload,
+        },
+    )
+    return request_responses_stream_parsed(
+        active_settings,
+        payload,
+        parse_enroute_analysis_selection,
+        logger=logger,
+        request_context="enroute_analysis_selection",
+        database_path=database_path,
+    )
+
+
+def build_enroute_analysis_selection_payload(
+    settings: Settings,
+    main_image_url: str,
+    size_reference_image_url: str,
+    analysis_summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build an OpenAI Responses vision request for cached Enroute selection."""
+
+    payload: dict[str, Any] = {
+        "model": settings.openai_model,
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": build_enroute_analysis_selection_system_prompt(
+                            analysis_summaries
+                        ),
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": ENROUTE_ANALYSIS_SELECTION_USER_PROMPT,
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": main_image_url,
+                        "detail": "high",
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": size_reference_image_url,
+                        "detail": "high",
+                    },
+                ],
+            },
+        ],
+        "stream": True,
+    }
+    if settings.enroute_analysis_temperature is not None:
+        payload["temperature"] = settings.enroute_analysis_temperature
+    if settings.enroute_analysis_top_p is not None:
+        payload["top_p"] = settings.enroute_analysis_top_p
+    return payload
+
+
+def parse_enroute_analysis_selection(text: str) -> EnrouteAnalysisSelection:
+    payload = _extract_json_object(text)
+    return EnrouteAnalysisSelection.model_validate(payload)
+
+
+def build_enroute_analysis_selection_system_prompt(
+    analysis_summaries: list[dict[str, Any]],
+) -> str:
+    return ENROUTE_ANALYSIS_SELECTION_SYSTEM_PROMPT.replace(
+        "{analysis_summaries}",
+        json_dumps_for_prompt(analysis_summaries),
+    )
 
 
 def parse_enroute_reference_analysis(text: str) -> EnrouteReferenceAnalysis:
@@ -337,6 +503,45 @@ def _vision_messages(
             ],
         }
     ]
+
+
+def _selection_vision_messages(
+    main_path: Path,
+    size_path: Path,
+    analysis_summaries: list[dict[str, Any]],
+) -> list[Any]:
+    return [
+        {
+            "role": "system",
+            "content": build_enroute_analysis_selection_system_prompt(
+                analysis_summaries
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": ENROUTE_ANALYSIS_SELECTION_USER_PROMPT},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": _image_file_to_data_url(main_path),
+                        "detail": "high",
+                    },
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": _image_file_to_data_url(size_path),
+                        "detail": "high",
+                    },
+                },
+            ],
+        },
+    ]
+
+
+def json_dumps_for_prompt(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2)
 
 
 def _clean_instruction_list(values: list[str]) -> list[str]:

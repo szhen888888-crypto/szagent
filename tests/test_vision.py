@@ -1,4 +1,7 @@
 import json
+import sqlite3
+
+import httpx
 
 from productv2.config import Settings
 from productv2.vision import build_responses_vision_payload
@@ -216,7 +219,77 @@ def test_request_responses_stream_text_retries_empty_output(monkeypatch) -> None
     assert len(calls) == 2
 
 
-def test_request_responses_stream_parsed_retries_parse_failure(monkeypatch) -> None:
+def test_request_responses_stream_text_falls_back_to_next_provider(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, url: str) -> None:
+            self.request = httpx.Request("POST", url)
+            self.status_code = 500 if "primary" in url else 200
+            self.is_error = self.status_code >= 400
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+        @property
+        def text(self):
+            return "server error" if self.is_error else ""
+
+        def read(self):
+            return self.text.encode("utf-8")
+
+        def iter_lines(self):
+            yield 'data: {"type":"response.output_text.delta","delta":"ok"}'
+            yield ""
+            yield "data: [DONE]"
+            yield ""
+
+    def fake_stream(method, url, headers, json, timeout):
+        calls.append(
+            {
+                "url": url,
+                "authorization": headers["Authorization"],
+            }
+        )
+        return FakeResponse(url)
+
+    monkeypatch.setattr("productv2.vision.httpx.stream", fake_stream)
+
+    text = request_responses_stream_text(
+        Settings(
+            openai_api_key="sk-primary",
+            openai_api_base="https://primary.test",
+            openai_max_retries=0,
+            openai_fallback_providers=(
+                '[{"name":"backup","api_base":"https://backup.test",'
+                '"api_key":"sk-backup"}]'
+            ),
+        ),
+        {"model": "gpt-test", "input": [], "stream": True},
+    )
+
+    assert text == "ok"
+    assert calls == [
+        {
+            "url": "https://primary.test/v1/responses",
+            "authorization": "Bearer sk-primary",
+        },
+        {
+            "url": "https://backup.test/v1/responses",
+            "authorization": "Bearer sk-backup",
+        },
+    ]
+
+
+def test_request_responses_stream_parsed_retries_parse_failure(
+    monkeypatch,
+    tmp_path,
+) -> None:
     calls = []
 
     class FakeResponse:
@@ -256,6 +329,7 @@ def test_request_responses_stream_parsed_retries_parse_failure(monkeypatch) -> N
             openai_api_key="sk-test",
             openai_api_base="https://example.test",
             openai_max_retries=2,
+            productv2_database_path=tmp_path / "locks.db",
         ),
         {"model": "gpt-test", "input": [], "stream": True},
         json.loads,
@@ -263,6 +337,75 @@ def test_request_responses_stream_parsed_retries_parse_failure(monkeypatch) -> N
 
     assert result == {"ok": True}
     assert len(calls) == 2
+
+
+def test_request_responses_stream_parsed_uses_ai_call_lock_cache(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    calls = []
+
+    class FakeResponse:
+        is_error = False
+        status_code = 200
+        request = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+        def iter_lines(self):
+            yield json.dumps(
+                {
+                    "type": "response.output_text.delta",
+                    "delta": '{"ok": true}',
+                }
+            )
+            yield ""
+            yield "data: [DONE]"
+            yield ""
+
+    def fake_stream(method, url, headers, json, timeout):
+        calls.append({"method": method, "url": url})
+        return FakeResponse()
+
+    monkeypatch.setattr("productv2.vision.httpx.stream", fake_stream)
+    settings = Settings(
+        openai_api_key="sk-test",
+        openai_api_base="https://example.test",
+        openai_fallback_providers=(
+            '[{"name":"backup","api_base":"https://backup.test",'
+            '"api_key":"sk-backup"}]'
+        ),
+        productv2_database_path=tmp_path / "locks.db",
+    )
+    payload = {"model": "gpt-test", "input": [], "stream": True}
+
+    first = request_responses_stream_parsed(settings, payload, json.loads)
+    second = request_responses_stream_parsed(settings, payload, json.loads)
+
+    assert first == {"ok": True}
+    assert second == {"ok": True}
+    assert len(calls) == 1
+    with sqlite3.connect(tmp_path / "locks.db") as connection:
+        request_json = connection.execute(
+            """
+            SELECT request_json
+            FROM ai_call_locks
+            WHERE call_type = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ("llm:responses_stream",),
+        ).fetchone()[0]
+    request_payload = json.loads(request_json)
+    assert request_payload["providers"] == [
+        {"name": "primary", "api_base": "https://example.test"},
+        {"name": "backup", "api_base": "https://backup.test"},
+    ]
+    assert "sk-backup" not in request_json
 
 
 def test_request_responses_stream_logs_raw_input_output(monkeypatch, tmp_path) -> None:
@@ -301,6 +444,7 @@ def test_request_responses_stream_logs_raw_input_output(monkeypatch, tmp_path) -
         Settings(
             openai_api_key="sk-test",
             openai_api_base="https://example.test",
+            productv2_database_path=tmp_path / "locks.db",
         ),
         {"model": "gpt-test", "input": [{"role": "user", "content": "原始提示"}]},
         json.loads,

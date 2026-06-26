@@ -1,7 +1,11 @@
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
+import productv2.wearing as wearing_module
+from productv2.config import Settings
+from productv2.image_generation import ImageGenerationResult
 from productv2.models import CandidateProduct
 from productv2.wearing import build_wearing_image_prompt
 from productv2.wearing import create_labeled_reference_image
@@ -49,13 +53,39 @@ def test_build_wearing_image_prompt_uses_analysis_and_consistency_rules() -> Non
     assert "/tmp/model.jpg" in prompt
 
 
-def test_generate_wearing_image_prepares_marked_inputs_and_prompt(tmp_path) -> None:
+def test_generate_wearing_image_prepares_marked_inputs_and_prompt(
+    monkeypatch,
+    tmp_path,
+) -> None:
     main = tmp_path / "main.jpg"
     size = tmp_path / "size.jpg"
     model = tmp_path / "model.jpg"
+    generated = tmp_path / "generated.png"
     Image.new("RGB", (80, 100), "white").save(main)
     Image.new("RGB", (80, 100), "gray").save(size)
     Image.new("RGB", (80, 100), "blue").save(model)
+    Image.new("RGB", (80, 100), "green").save(generated)
+    data_url = wearing_module.image_file_to_data_url(generated)
+
+    class FakeImageGenerator:
+        settings = Settings(image_generation_api_key="sk-test")
+
+        def generate(self, *, prompt, images, wait):
+            assert wait is True
+            assert "collarbone crop" in prompt
+            assert len(images) == 3
+            return ImageGenerationResult(
+                id="task-1",
+                status="succeeded",
+                progress=100,
+                urls=[data_url],
+            )
+
+    monkeypatch.setattr(
+        wearing_module,
+        "get_image_generator",
+        lambda logger=None: FakeImageGenerator(),
+    )
 
     result = generate_wearing_image(
         CandidateProduct(product_id="p-1", platform="1688", rawdata={}),
@@ -82,7 +112,13 @@ def test_generate_wearing_image_prepares_marked_inputs_and_prompt(tmp_path) -> N
         tmp_path / "product",
     )
 
-    assert result["status"] == "reserved"
+    assert result["status"] == "ok"
+    assert result["reason"] == "wearing_image_generated"
+    assert result["attempt"] == 1
+    assert result["generated_image_path"] == str(
+        tmp_path / "product" / "wearing_image_attempt_1.png"
+    )
+    assert Path(result["generated_image_path"]).exists()
     assert result["input_images"] == [
         str(tmp_path / "product" / "wearing_generation_inputs" / "01_main_image.jpg"),
         str(
@@ -98,3 +134,80 @@ def test_generate_wearing_image_prepares_marked_inputs_and_prompt(tmp_path) -> N
     assert "collarbone crop" in result["prompt"]
     for image_path in result["input_images"]:
         assert Path(image_path).exists()
+
+
+def test_generate_wearing_image_raises_image_generation_exception(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    main = tmp_path / "main.jpg"
+    size = tmp_path / "size.jpg"
+    Image.new("RGB", (80, 100), "white").save(main)
+    Image.new("RGB", (80, 100), "gray").save(size)
+
+    class FakeImageGenerator:
+        settings = Settings(image_generation_api_key="sk-test")
+
+        def generate(self, **_kwargs):
+            raise RuntimeError("HTTP 503")
+
+    monkeypatch.setattr(
+        wearing_module,
+        "get_image_generator",
+        lambda logger=None: FakeImageGenerator(),
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        generate_wearing_image(
+            CandidateProduct(product_id="p-1", platform="1688", rawdata={}),
+            {
+                "image_numbers": [2],
+                "selected_images": {
+                    "main_image": {"path": str(main)},
+                    "size_reference_image": {"path": str(size)},
+                },
+            },
+            {},
+            tmp_path / "product",
+        )
+
+
+def test_generate_wearing_image_raises_when_generation_status_failed(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    main = tmp_path / "main.jpg"
+    size = tmp_path / "size.jpg"
+    Image.new("RGB", (80, 100), "white").save(main)
+    Image.new("RGB", (80, 100), "gray").save(size)
+
+    class FakeImageGenerator:
+        settings = Settings(image_generation_api_key="sk-test")
+
+        def generate(self, **_kwargs):
+            return ImageGenerationResult(
+                id="task-1",
+                status="failed",
+                progress=100,
+                error="third party error",
+            )
+
+    monkeypatch.setattr(
+        wearing_module,
+        "get_image_generator",
+        lambda logger=None: FakeImageGenerator(),
+    )
+
+    with pytest.raises(RuntimeError, match="Image generation did not succeed"):
+        generate_wearing_image(
+            CandidateProduct(product_id="p-1", platform="1688", rawdata={}),
+            {
+                "image_numbers": [2],
+                "selected_images": {
+                    "main_image": {"path": str(main)},
+                    "size_reference_image": {"path": str(size)},
+                },
+            },
+            {},
+            tmp_path / "product",
+        )

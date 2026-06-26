@@ -12,20 +12,47 @@ uv sync
 ## 运行工作流
 
 ```bash
-uv run productv2 --limit 3
+uv run langgraph dev --allow-blocking
 ```
 
-处理全部候选商品：
+主流程已迁移到 `langgraph dev`。服务启动后，优先使用安全恢复命令启动 workflow：
 
 ```bash
-uv run productv2 --all
+uv run productv2 restart-workflow
 ```
 
-也可以使用显式子命令：
+该命令会先检查 LangGraph API 中是否存在未完成 thread：正在运行的 thread 会直接返回状态；等待人工审核的 interrupted thread 会返回待审核信息，不会新建 workflow。确认审核结果后再显式 resume：
 
 ```bash
-uv run productv2 run --limit 3
+uv run productv2 restart-workflow --resume-json '{"action":"approve"}'
 ```
+
+没有未完成 thread 时，该命令才会创建新 thread 并启动 `product_listing` graph。执行到佩戴图审核节点时会暂停，resume payload 示例：
+
+```json
+{"action": "approve"}
+```
+
+可选动作：`approve` 继续后续流程，`regenerate` 重新生成佩戴图，`reject` 标记当前商品失败并重新选品。
+
+图入口配置在 `langgraph.json`，导出对象为 `src/productv2/dev_graph.py:product_listing`。`langgraph dev` 的本地 in-memory runtime 会接管持久化并支持 `interrupt()` / resume；不要在导出图里手动传入自定义 checkpointer。
+
+## 控制台
+
+本地控制台用于操作 LangGraph dev 服务和 thread，不直接编辑商品数据：
+
+```bash
+uv run productv2 control-api
+uv run productv2 control-ui
+```
+
+默认地址：
+
+- 控制 API：`http://127.0.0.1:8765`
+- Web 控制台：`http://127.0.0.1:5173`
+- LangGraph API：`http://127.0.0.1:2024`
+
+控制台支持查看服务在线状态、由控制台启动/停止/重启本机 `langgraph dev`、查看 thread 列表与 state、启动 workflow、安全恢复 workflow，以及对 interrupted thread 发送 resume JSON。
 
 ## 初始化 SQLite 数据库
 
@@ -51,7 +78,13 @@ uv run productv2 reset-db
 
 ## 原始数据目录
 
-程序启动时会先扫描 `data/raw` 下的 `*.json` 文件。扫描到数据后会导入 `products` 表：
+使用 CLI 工具扫描 `data/raw` 下的 `*.json` 文件：
+
+```bash
+uv run productv2 import-raw
+```
+
+扫描到数据后会导入 `products` 表：
 
 - `status` 写入 `all_pendding`
 - 五个图片字段保持默认空字符串
@@ -61,7 +94,7 @@ uv run productv2 reset-db
 
 原始数据目录可通过 `PRODUCTV2_RAW_DATA_DIR` 或 `--raw-data-dir` 覆盖。
 
-默认主流程不读取固定候选 JSON 文件；它只从 SQLite 选择待处理产品。`--data-path` 仅用于显式调试工作流或 `init-db --seed-candidates` 手动导入。
+默认主流程不读取固定候选 JSON 文件；它只从 SQLite 选择待处理产品。`--data-path` 仅用于 `init-db --seed-candidates` 手动导入。
 
 `products` 表以 `product_id + platform` 作为组合唯一键，图片字段默认空字符串：
 
@@ -108,9 +141,21 @@ data/products/<platform>/<product_id>/main_image_collage.jpg
 workflow-logs/<product_name>__<platform>__<product_id>.log
 ```
 
-工作流启动时会先创建临时运行日志；一旦选中产品，会使用产品名称、平台和产品 ID 重命名日志文件，避免同名产品覆盖。日志路径会写入返回结果的 `metrics.workflow_log_path`。日志记录 `workflow_start` / `workflow_end`、每个节点的 `node_start` / `node_end`、异常时的 `node_error` / `workflow_error`，以及尺寸检测后的 `branch_decision`。每个逻辑单元都会带中文说明，解释该节点在流程中的作用。
+工作流启动时会先创建临时运行日志；一旦选中产品，会使用产品名称、平台和产品 ID 重命名日志文件，避免同名产品覆盖。日志路径会写入返回结果的 `metrics.workflow_log_path`。日志记录 `workflow_start`、每个节点的 `node_start` / `node_end`、interrupt 时的 `node_interrupt`、异常时的 `node_error`，以及条件边的 `branch_decision`。每个逻辑单元都会带中文说明，解释该节点在流程中的作用。
+
+在 `langgraph dev` 中，日志路径也会写入 workflow state 的 `workflow_log_path`。人工审核节点触发 `interrupt()` 时会记录 `node_interrupt`，这属于正常暂停，不是错误。
 
 节点日志以中文文本记录输入数据、输出数据、状态记忆摘要、状态写回逻辑，以及 `status`、`reason`、`cache`、`can_judge_size`、图片编号、选中模特、Enroute 参考图路径等关键判断字段。候选产品 `candidates` 只记录数量、产品 ID、平台、标题、状态、锁信息和 rawdata 字段名，不记录完整 rawdata。LLM 和图片 AI 调用会额外记录原始输入与原始输出，包括 prompt、请求参数、图片输入路径/URL、模型原始响应文本或接口原始响应 JSON。日志目录可通过 `PRODUCTV2_WORKFLOW_LOGS_DIR` 覆盖，默认不纳入 Git。
+
+## AI Checkpoint
+
+所有 workflow 内的 LLM 和图片 AI 调用结果都会写入 LangGraph state 的 `ai_checkpoints`。当前保存范围：
+
+- `detect_size_reference`：主图拼图尺寸参照检测 LLM 结果。
+- `analyze_enroute_reference`：Enroute 佩戴参考图逆向分析 LLM 结果，包含数据库缓存命中结果。
+- `generate_wearing_image_attempt_<n>`：第 `n` 次佩戴图生成图片 AI 结果。
+
+每个 checkpoint 包含 `type`、`source`、`input`、`input_hash`、`status`、`result` 和 `attempt_count`。节点重入时如果 `input_hash` 一致，会优先复用 state checkpoint，不重复调用外部 LLM 或图片生成接口；人工要求 `regenerate` 时会进入新的 attempt checkpoint。
 
 ## LLM 配置
 
@@ -137,7 +182,7 @@ ENROUTE_ANALYSIS_TOP_P=0.9
 ```bash
 IMAGE_GENERATION_API_BASE=https://grsaiapi.com
 IMAGE_GENERATION_MODEL=gpt-image-2
-IMAGE_GENERATION_ASPECT_RATIO=1024x1024
+IMAGE_GENERATION_ASPECT_RATIO=4/5
 IMAGE_GENERATION_REPLY_TYPE=json
 IMAGE_GENERATION_TIMEOUT=600
 IMAGE_GENERATION_POLL_TIMEOUT=600
@@ -147,6 +192,14 @@ IMAGE_GENERATION_POLL_TIMEOUT=600
 
 - `POST /v1/api/generate`
 - `GET /v1/api/result?id=<task_id>`
+
+佩戴图生成节点会调用该组件，把带标记的产品主图、尺寸参考图和固定模特图作为输入，生成结果按 attempt 保存到：
+
+```text
+data/products/<platform>/<product_id>/wearing_image_attempt_<n>.*
+```
+
+该路径只写入本次 workflow 的 `wearing_image_result.generated_image_path`，不会写入 `products.wearing_image`。
 
 ## 虚拟模特风格
 
@@ -168,7 +221,7 @@ data/model_profiles/<profile_key>/model.jpg
 
 当前图片是白/浅灰背景的三视图技术参考图，用于让 AI 识别模特五官、肤色、体型和三维比例。工作流启动时会把这些图片路径和模特摘要同步到 SQLite `model_profiles` 表。
 
-Enroute 佩戴图逆向分析会把 `model_profiles.summary` 注入 LLM system prompt，并要求逆向 JSON 输出 `selected_model_profile`。佩戴图生成预留节点会把选中的固定模特三视图图片加入输入图片列表。
+Enroute 佩戴图逆向分析会把 `model_profiles.summary` 注入 LLM system prompt，并要求逆向 JSON 输出 `selected_model_profile`。佩戴图生成节点会把选中的固定模特三视图图片加入输入图片列表。
 
 ## Enroute 参考图库
 

@@ -57,6 +57,23 @@ def select_enroute_wearing_reference(
     return active_rng.choice(references)
 
 
+def list_enroute_wearing_references(
+    candidate: CandidateProduct,
+    library_dir: str | Path = DEFAULT_ENROUTE_BESTSELLERS_DIR,
+) -> tuple[str | None, list[EnrouteReference]]:
+    """Load all local 02.jpg references from the candidate's matching category."""
+
+    root = Path(library_dir)
+    if not root.exists():
+        return None, []
+
+    category = infer_enroute_category(candidate)
+    if category is None:
+        return None, []
+
+    return category, _load_category_references(root, category)
+
+
 def infer_enroute_category(candidate: CandidateProduct) -> str | None:
     """Infer the closest Enroute category from product raw data."""
 

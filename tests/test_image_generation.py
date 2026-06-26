@@ -58,7 +58,7 @@ def test_image_generation_generate_polls_running_task(monkeypatch) -> None:
         calls.append(("create", request.prompt))
         return parse_image_generation_response({"id": "task-1", "status": "running"})
 
-    def fake_poll(task_id):
+    def fake_poll(task_id, database_path=None):
         calls.append(("poll", task_id))
         return parse_image_generation_response(
             {
@@ -85,6 +85,7 @@ def test_image_generation_client_logs_raw_input_output(monkeypatch, tmp_path) ->
             image_generation_api_key="sk-test",
             image_generation_api_base="https://example.test",
             image_generation_model="gpt-image-2",
+            productv2_database_path=tmp_path / "locks.db",
         ),
         logger=logger,
     )
@@ -122,3 +123,136 @@ def test_image_generation_client_logs_raw_input_output(monkeypatch, tmp_path) ->
     assert "https://example.test/ref.jpg" in log_text
     assert "- 原始响应 JSON (raw_response_json):" in log_text
     assert "https://example.test/out.png" in log_text
+
+
+def test_image_generation_create_uses_ai_call_lock_cache(monkeypatch, tmp_path) -> None:
+    client = ImageGenerationClient(
+        Settings(
+            image_generation_api_key="sk-test",
+            image_generation_api_base="https://example.test",
+            image_generation_model="gpt-image-2",
+            productv2_database_path=tmp_path / "locks.db",
+        )
+    )
+    calls = []
+
+    class FakeResponse:
+        is_error = False
+        status_code = 200
+
+        def json(self):
+            return {
+                "id": "task-1",
+                "status": "succeeded",
+                "results": [{"url": "https://example.test/out.png"}],
+            }
+
+    def fake_request_with_retries(method, url, **kwargs):
+        calls.append({"method": method, "url": url, "kwargs": kwargs})
+        return FakeResponse()
+
+    monkeypatch.setattr(client, "_request_with_retries", fake_request_with_retries)
+    request = ImageGenerationRequest(
+        prompt="生成产品佩戴图",
+        images=["https://example.test/ref.jpg"],
+    )
+
+    first = client.create(request)
+    second = client.create(request)
+
+    assert first.id == "task-1"
+    assert second.id == "task-1"
+    assert len(calls) == 1
+    assert calls[0]["kwargs"]["max_attempts"] == 1
+
+
+def test_image_generation_generate_uses_async_reply_and_result_polling(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    client = ImageGenerationClient(
+        Settings(
+            image_generation_api_key="sk-test",
+            image_generation_api_base="https://example.test",
+            image_generation_model="gpt-image-2",
+            image_generation_reply_type="async",
+            image_generation_poll_interval=0.01,
+            productv2_database_path=tmp_path / "locks.db",
+        )
+    )
+    calls = []
+
+    class FakeResponse:
+        is_error = False
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    def fake_request_with_retries(method, url, **kwargs):
+        calls.append({"method": method, "url": url, "kwargs": kwargs})
+        if method == "POST":
+            assert kwargs["json"]["replyType"] == "async"
+            return FakeResponse({"id": "task-1", "status": "running", "progress": 0})
+        if len([call for call in calls if call["method"] == "GET"]) == 1:
+            return FakeResponse({"id": "task-1", "status": "running", "progress": 50})
+        return FakeResponse(
+            {
+                "id": "task-1",
+                "status": "succeeded",
+                "progress": 100,
+                "results": [{"url": "https://example.test/out.png"}],
+            }
+        )
+
+    monkeypatch.setattr(client, "_request_with_retries", fake_request_with_retries)
+
+    result = client.generate("生成产品佩戴图", wait=True)
+
+    assert result.status == "succeeded"
+    assert result.urls == ["https://example.test/out.png"]
+    assert [call["method"] for call in calls] == ["POST", "GET", "GET"]
+
+
+def test_image_generation_poll_reclaims_stale_lock(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "locks.db"
+    task_id = "task-1"
+    client = ImageGenerationClient(
+        Settings(
+            image_generation_api_key="sk-test",
+            image_generation_api_base="https://example.test",
+            image_generation_poll_timeout=0.01,
+            image_generation_poll_interval=0.01,
+            productv2_database_path=database_path,
+        )
+    )
+    calls = []
+
+    class FakeResponse:
+        is_error = False
+        status_code = 200
+
+        def json(self):
+            return {
+                "id": task_id,
+                "status": "succeeded",
+                "progress": 100,
+                "results": [{"url": "https://example.test/out.png"}],
+            }
+
+    def fake_request_with_retries(method, url, **kwargs):
+        calls.append({"method": method, "url": url, "kwargs": kwargs})
+        return FakeResponse()
+
+    monkeypatch.setattr(client, "_request_with_retries", fake_request_with_retries)
+
+    first = client.poll(task_id, database_path=database_path)
+    second = client.poll(task_id, database_path=database_path)
+
+    assert first.status == "succeeded"
+    assert second.status == "succeeded"
+    assert second.urls == ["https://example.test/out.png"]
+    assert [call["method"] for call in calls] == ["GET"]

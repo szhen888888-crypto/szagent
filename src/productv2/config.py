@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,6 +23,15 @@ DEFAULT_OPENAI_BASE_URL = "https://www.lynxhub.top"
 DEFAULT_OPENAI_MODEL = "gpt-5.5"
 DEFAULT_IMAGE_GENERATION_BASE_URL = "https://grsaiapi.com"
 DEFAULT_IMAGE_GENERATION_MODEL = "gpt-image-2"
+
+
+@dataclass(frozen=True)
+class LLMProvider:
+    """OpenAI-compatible Responses API provider configuration."""
+
+    name: str
+    api_base: str
+    api_key: str
 
 
 class Settings(BaseSettings):
@@ -42,17 +54,23 @@ class Settings(BaseSettings):
     openai_stream_usage: bool = False
     openai_timeout: float | None = 120.0
     openai_max_retries: int = 2
+    openai_fallback_providers: str = ""
     enroute_analysis_temperature: float | None = 0.9
     enroute_analysis_top_p: float | None = 0.9
     image_generation_api_key: SecretStr | None = None
     image_generation_api_base: str = DEFAULT_IMAGE_GENERATION_BASE_URL
     image_generation_model: str = DEFAULT_IMAGE_GENERATION_MODEL
-    image_generation_aspect_ratio: str = "1024x1024"
-    image_generation_reply_type: str = "json"
+    image_generation_aspect_ratio: str = "4/5"
+    image_generation_reply_type: str = "async"
     image_generation_timeout: float | None = 600.0
     image_generation_max_retries: int = 2
     image_generation_poll_interval: float = 2.0
     image_generation_poll_timeout: float = 600.0
+    ai_call_lock_wait_timeout: float = 900.0
+    ai_call_lock_poll_interval: float = 2.0
+    ai_call_lock_stale_after: float = 3600.0
+    feishu_app_id: str = ""
+    feishu_app_secret: SecretStr | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -84,3 +102,64 @@ def build_chat_model(settings: Settings | None = None):
         timeout=active_settings.openai_timeout,
         max_retries=active_settings.openai_max_retries,
     )
+
+
+def llm_providers(settings: Settings) -> list[LLMProvider]:
+    """Return primary and fallback OpenAI-compatible providers in call order."""
+
+    providers: list[LLMProvider] = []
+    primary_key = (
+        settings.openai_api_key.get_secret_value()
+        if settings.openai_api_key
+        else ""
+    )
+    if primary_key:
+        providers.append(
+            LLMProvider(
+                name="primary",
+                api_base=settings.openai_api_base,
+                api_key=primary_key,
+            )
+        )
+    providers.extend(_parse_fallback_providers(settings.openai_fallback_providers))
+    return providers
+
+
+def llm_provider_fingerprint(settings: Settings) -> list[dict[str, str]]:
+    """Provider identity for lock/cache keys without exposing secrets."""
+
+    return [
+        {"name": provider.name, "api_base": provider.api_base}
+        for provider in llm_providers(settings)
+    ]
+
+
+def _parse_fallback_providers(raw_value: str) -> list[LLMProvider]:
+    if not raw_value.strip():
+        return []
+    parsed = json.loads(raw_value)
+    if not isinstance(parsed, list):
+        raise ValueError("OPENAI_FALLBACK_PROVIDERS must be a JSON array")
+    providers: list[LLMProvider] = []
+    for index, item in enumerate(parsed, start=1):
+        if not isinstance(item, dict):
+            raise ValueError("Each OPENAI_FALLBACK_PROVIDERS item must be an object")
+        api_base = _string_value(item, "api_base") or _string_value(item, "base_url")
+        api_key = _string_value(item, "api_key") or _string_value(item, "key")
+        if not api_base or not api_key:
+            raise ValueError(
+                "Each OPENAI_FALLBACK_PROVIDERS item requires api_base and api_key"
+            )
+        providers.append(
+            LLMProvider(
+                name=_string_value(item, "name") or f"fallback_{index}",
+                api_base=api_base,
+                api_key=api_key,
+            )
+        )
+    return providers
+
+
+def _string_value(item: dict[str, Any], key: str) -> str:
+    value = item.get(key)
+    return value.strip() if isinstance(value, str) else ""

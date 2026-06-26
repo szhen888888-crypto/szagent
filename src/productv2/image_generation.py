@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
+from productv2.ai_locks import run_with_ai_call_lock
 from productv2.config import Settings
 from productv2.workflow_logging import WorkflowRunLogger, prepare_ai_log_data
 
@@ -50,6 +51,7 @@ class ImageGenerationClient:
         aspect_ratio: str | None = None,
         model: str | None = None,
         wait: bool = True,
+        database_path: str | Path | None = None,
     ) -> ImageGenerationResult:
         request = ImageGenerationRequest(
             prompt=prompt,
@@ -57,13 +59,37 @@ class ImageGenerationClient:
             aspect_ratio=aspect_ratio,
             model=model,
         )
-        result = self.create(request)
-        if wait and result.status == "running":
-            return self.poll(result.id)
+        result = (
+            self.create(request)
+            if database_path is None
+            else self.create(request, database_path=database_path)
+        )
+        if wait and _is_running_status(result.status):
+            return self.poll(result.id, database_path=database_path)
         return result
 
-    def create(self, request: ImageGenerationRequest) -> ImageGenerationResult:
+    def create(
+        self,
+        request: ImageGenerationRequest,
+        database_path: str | Path | None = None,
+    ) -> ImageGenerationResult:
         payload = self._build_payload(request)
+
+        return run_with_ai_call_lock(
+            database_path=database_path or self.settings.productv2_database_path,
+            call_type="image_generation:create",
+            request={
+                "endpoint": self.generate_url,
+                "payload": payload,
+            },
+            execute=lambda: self._create_unlocked(payload),
+            result_to_json=lambda result: result.model_dump(),
+            result_from_json=lambda value: ImageGenerationResult.model_validate(value),
+            settings=self.settings,
+            logger=self.logger,
+        )
+
+    def _create_unlocked(self, payload: dict[str, Any]) -> ImageGenerationResult:
         self._log_image_ai_request(
             context="image_generation_create",
             data={
@@ -74,6 +100,7 @@ class ImageGenerationClient:
         response = self._request_with_retries(
             "POST",
             self.generate_url,
+            max_attempts=1,
             json=payload,
         )
         raw_response = response.json()
@@ -83,10 +110,34 @@ class ImageGenerationClient:
         )
         return parse_image_generation_response(raw_response)
 
-    def poll(self, task_id: str) -> ImageGenerationResult:
+    def poll(
+        self,
+        task_id: str,
+        database_path: str | Path | None = None,
+    ) -> ImageGenerationResult:
+        stale_after_seconds = (
+            self.settings.image_generation_poll_timeout
+            + max(5.0, self.settings.image_generation_poll_interval * 2)
+        )
+        return run_with_ai_call_lock(
+            database_path=database_path or self.settings.productv2_database_path,
+            call_type="image_generation:poll",
+            request={
+                "endpoint": self.result_url,
+                "task_id": task_id,
+            },
+            execute=lambda: self._poll_unlocked(task_id),
+            result_to_json=lambda result: result.model_dump(),
+            result_from_json=lambda value: ImageGenerationResult.model_validate(value),
+            settings=self.settings,
+            logger=self.logger,
+            stale_after_seconds=stale_after_seconds,
+        )
+
+    def _poll_unlocked(self, task_id: str) -> ImageGenerationResult:
         deadline = time.monotonic() + self.settings.image_generation_poll_timeout
         result = self.get_result(task_id)
-        while result.status == "running":
+        while _is_running_status(result.status):
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"Image generation task timed out: {task_id}")
             time.sleep(self.settings.image_generation_poll_interval)
@@ -131,7 +182,14 @@ class ImageGenerationClient:
             "replyType": request.reply_type or self.settings.image_generation_reply_type,
         }
 
-    def _request_with_retries(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    def _request_with_retries(
+        self,
+        method: str,
+        url: str,
+        *,
+        max_attempts: int | None = None,
+        **kwargs: Any,
+    ) -> httpx.Response:
         api_key = (
             self.settings.image_generation_api_key.get_secret_value()
             if self.settings.image_generation_api_key
@@ -145,7 +203,12 @@ class ImageGenerationClient:
         if method.upper() == "POST":
             headers.setdefault("Content-Type", "application/json")
 
-        attempts = max(1, self.settings.image_generation_max_retries + 1)
+        attempts = max(
+            1,
+            max_attempts
+            if max_attempts is not None
+            else self.settings.image_generation_max_retries + 1,
+        )
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
@@ -277,3 +340,7 @@ def _raise_for_http_error(response: httpx.Response) -> None:
 
 def _is_retryable_status(status_code: int) -> bool:
     return status_code in {408, 409, 429, 500, 502, 503, 504}
+
+
+def _is_running_status(status: str) -> bool:
+    return str(status or "").lower() in {"running", "pending", "queued", "processing"}

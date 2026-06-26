@@ -83,6 +83,38 @@ def test_workflow_logger_summarizes_candidates_and_describes_node(tmp_path) -> N
     assert "https://example.test/1.jpg" not in log_text
 
 
+def test_workflow_logger_summarizes_selected_product_rawdata(tmp_path) -> None:
+    logger = WorkflowRunLogger(tmp_path, run_id="run-selected-product")
+
+    def node(state):
+        return {"selected_product": state["selected_product"]}
+
+    wrapped = wrap_node_with_logging("merge_main_images", node, logger)
+    wrapped(
+        {
+            "selected_product": {
+                "id": 1,
+                "product_id": "p-1",
+                "platform": "1688",
+                "status": "processing",
+                "rawdata": {
+                    "title": "测试商品",
+                    "detail": {"image_urls": ["https://example.test/1.jpg"]},
+                    "very_large_field": "SHOULD_NOT_APPEAR",
+                },
+            }
+        }
+    )
+
+    log_text = logger.path.read_text(encoding="utf-8")
+    assert "- selected_product:" in log_text
+    assert "- title: 测试商品" in log_text
+    assert "- 原始数据字段 (rawdata_keys):" in log_text
+    assert "very_large_field" in log_text
+    assert "SHOULD_NOT_APPEAR" not in log_text
+    assert "https://example.test/1.jpg" not in log_text
+
+
 def test_workflow_logger_renames_file_with_product_name(tmp_path) -> None:
     logger = WorkflowRunLogger(tmp_path, run_id="run-product")
     original_path = logger.path

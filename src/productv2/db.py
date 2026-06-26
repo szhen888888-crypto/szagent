@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +93,28 @@ CREATE TABLE IF NOT EXISTS model_profiles (
 );
 """
 
+AI_CALL_LOCKS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS ai_call_locks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_key TEXT NOT NULL,
+    call_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'in_progress',
+    owner TEXT NOT NULL DEFAULT '',
+    request_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    locked_at TEXT DEFAULT NULL,
+    UNIQUE (call_key)
+);
+"""
+
+AI_CALL_LOCKS_STATUS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_ai_call_locks_status
+ON ai_call_locks (status);
+"""
+
 
 def connect_database(database_path: str | Path = DEFAULT_DATABASE_PATH) -> sqlite3.Connection:
     """Open a SQLite connection and ensure the parent directory exists."""
@@ -113,11 +135,13 @@ def init_database(database_path: str | Path = DEFAULT_DATABASE_PATH) -> Path:
         connection.execute(PRODUCTS_TABLE_SQL)
         connection.execute(ENROUTE_IMAGE_ANALYSES_TABLE_SQL)
         connection.execute(MODEL_PROFILES_TABLE_SQL)
+        connection.execute(AI_CALL_LOCKS_TABLE_SQL)
         _ensure_products_column(connection, "locked_at", "TEXT DEFAULT NULL")
         _ensure_products_column(connection, "locked_by", "TEXT DEFAULT NULL")
         connection.execute(PRODUCTS_STATUS_INDEX_SQL)
         connection.execute(PRODUCTS_LOCK_INDEX_SQL)
         connection.execute(ENROUTE_IMAGE_ANALYSES_CATEGORY_INDEX_SQL)
+        connection.execute(AI_CALL_LOCKS_STATUS_INDEX_SQL)
     return path
 
 
@@ -175,6 +199,24 @@ def seed_candidate_products(
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _utc_now_datetime() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_db_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _row_to_candidate(row: sqlite3.Row) -> CandidateProduct:
@@ -442,6 +484,179 @@ def reset_products_for_processing(
     }
 
 
+def acquire_ai_call_lock(
+    database_path: str | Path,
+    *,
+    call_key: str,
+    call_type: str,
+    request: dict[str, Any],
+    owner: str | None = None,
+    stale_after_seconds: float = 3600.0,
+) -> dict[str, Any]:
+    """Acquire or inspect a persisted lock for one external AI call."""
+
+    init_database(database_path)
+    active_owner = owner or f"productv2-ai-{uuid.uuid4().hex}"
+    now = _utc_now()
+    request_json = json.dumps(request, ensure_ascii=False, separators=(",", ":"))
+    stale_before = _utc_now_datetime() - timedelta(seconds=max(0.0, stale_after_seconds))
+
+    with connect_database(database_path) as connection:
+        try:
+            connection.execute(
+                """
+                INSERT INTO ai_call_locks (
+                    call_key, call_type, status, owner, request_json, locked_at
+                )
+                VALUES (?, ?, 'in_progress', ?, ?, ?)
+                """,
+                (call_key, call_type, active_owner, request_json, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM ai_call_locks WHERE call_key = ?",
+                (call_key,),
+            ).fetchone()
+            return {**_row_to_ai_call_lock(row), "acquired": True, "reclaimed": False}
+        except sqlite3.IntegrityError:
+            row = connection.execute(
+                "SELECT * FROM ai_call_locks WHERE call_key = ?",
+                (call_key,),
+            ).fetchone()
+
+        lock = _row_to_ai_call_lock(row)
+        locked_at = _parse_db_datetime(lock.get("locked_at"))
+        reclaim_failed = lock.get("status") == "failed"
+        reclaim_stale = (
+            lock.get("status") == "in_progress"
+            and locked_at is not None
+            and locked_at < stale_before
+        )
+        if reclaim_failed or reclaim_stale:
+            status_condition = "failed" if reclaim_failed else "in_progress"
+            sql = """
+                UPDATE ai_call_locks
+                SET call_type = ?,
+                    status = 'in_progress',
+                    owner = ?,
+                    request_json = ?,
+                    result_json = '{}',
+                    error = '',
+                    locked_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE call_key = ?
+                  AND status = ?
+                """
+            params: tuple[Any, ...] = (
+                call_type,
+                active_owner,
+                request_json,
+                now,
+                call_key,
+                status_condition,
+            )
+            if not reclaim_failed:
+                sql = f"{sql} AND locked_at = ?"
+                params = (*params, lock.get("locked_at"))
+            cursor = connection.execute(sql, params)
+            if cursor.rowcount == 1:
+                row = connection.execute(
+                    "SELECT * FROM ai_call_locks WHERE call_key = ?",
+                    (call_key,),
+                ).fetchone()
+                return {**_row_to_ai_call_lock(row), "acquired": True, "reclaimed": True}
+
+        return {**lock, "acquired": False, "reclaimed": False}
+
+
+def get_ai_call_lock(
+    database_path: str | Path,
+    call_key: str,
+) -> dict[str, Any] | None:
+    """Load one persisted AI call lock by key."""
+
+    init_database(database_path)
+    with connect_database(database_path) as connection:
+        row = connection.execute(
+            "SELECT * FROM ai_call_locks WHERE call_key = ?",
+            (call_key,),
+        ).fetchone()
+    return _row_to_ai_call_lock(row) if row else None
+
+
+def update_ai_call_lock_result(
+    database_path: str | Path,
+    *,
+    call_key: str,
+    status: str,
+    result: dict[str, Any] | None = None,
+    error: str = "",
+) -> dict[str, Any]:
+    """Persist the final result for an external AI call lock."""
+
+    init_database(database_path)
+    result_json = json.dumps(result or {}, ensure_ascii=False, separators=(",", ":"))
+    with connect_database(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE ai_call_locks
+            SET status = ?,
+                result_json = ?,
+                error = ?,
+                locked_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE call_key = ?
+            """,
+            (status, result_json, error, call_key),
+        )
+        row = connection.execute(
+            "SELECT * FROM ai_call_locks WHERE call_key = ?",
+            (call_key,),
+        ).fetchone()
+    if row is None:
+        raise ValueError(f"AI call lock not found: {call_key}")
+    return _row_to_ai_call_lock(row)
+
+
+def reset_ai_call_locks(
+    database_path: str | Path = DEFAULT_DATABASE_PATH,
+) -> dict[str, Any]:
+    """Clear persisted AI call locks, used by the reset CLI."""
+
+    init_database(database_path)
+    with connect_database(database_path) as connection:
+        total_count = connection.execute(
+            "SELECT COUNT(*) FROM ai_call_locks"
+        ).fetchone()[0]
+        connection.execute("DELETE FROM ai_call_locks")
+    return {"ai_call_locks_deleted": int(total_count)}
+
+
+def _row_to_ai_call_lock(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "call_key": row["call_key"],
+        "call_type": row["call_type"],
+        "status": row["status"],
+        "owner": row["owner"],
+        "request": _json_loads_dict(row["request_json"]),
+        "result": _json_loads_dict(row["result_json"]),
+        "error": row["error"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "locked_at": row["locked_at"],
+    }
+
+
+def _json_loads_dict(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def get_enroute_image_analysis(
     database_path: str | Path,
     enroute_product_id: str,
@@ -462,6 +677,29 @@ def get_enroute_image_analysis(
         ).fetchone()
 
     return _row_to_enroute_image_analysis(row) if row else None
+
+
+def list_enroute_image_analyses_by_category(
+    database_path: str | Path,
+    enroute_category: str,
+) -> list[dict[str, Any]]:
+    """Load cached Enroute analyses for one category."""
+
+    init_database(database_path)
+    with connect_database(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, enroute_product_id, enroute_category, enroute_title,
+                   enroute_handle, image_path, image_position, analysis_json,
+                   summary, created_at, updated_at
+            FROM enroute_image_analyses
+            WHERE enroute_category = ?
+            ORDER BY id
+            """,
+            (enroute_category,),
+        ).fetchall()
+
+    return [_row_to_enroute_image_analysis(row) for row in rows]
 
 
 def upsert_enroute_image_analysis(

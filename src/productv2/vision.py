@@ -11,7 +11,8 @@ from typing import Any, Callable, Iterable, TypeVar
 import httpx
 from pydantic import BaseModel, Field
 
-from productv2.config import Settings
+from productv2.ai_locks import run_with_ai_call_lock
+from productv2.config import LLMProvider, Settings, llm_provider_fingerprint, llm_providers
 from productv2.workflow_logging import (
     WorkflowRunLogger,
     describe_file_for_log,
@@ -61,6 +62,7 @@ def detect_size_reference_images(
     settings: Settings | None = None,
     model: Any | None = None,
     logger: WorkflowRunLogger | None = None,
+    database_path: str | Path | None = None,
 ) -> SizeReferenceDetection:
     """Use OpenAI Responses streaming to detect images with human size reference."""
 
@@ -106,6 +108,7 @@ def detect_size_reference_images(
         parse_size_reference_detection,
         logger=logger,
         request_context="size_reference_detection",
+        database_path=database_path,
     )
 
 
@@ -140,72 +143,126 @@ def request_responses_stream_text(
 ) -> str:
     """Call the Responses streaming endpoint with raw HTTP/SSE."""
 
-    api_key = (
-        settings.openai_api_key.get_secret_value()
-        if settings.openai_api_key
-        else None
-    )
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY is required for LLM vision detection")
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "text/event-stream",
-        "Content-Type": "application/json",
-    }
     retry_count = settings.openai_max_retries if max_retries is None else max_retries
     attempts = max(1, retry_count + 1)
+    providers = llm_providers(settings)
+    if not providers:
+        raise ValueError("OPENAI_API_KEY or OPENAI_FALLBACK_PROVIDERS is required")
+
     last_error: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            _log_llm_request(
-                logger,
-                context=request_context,
-                payload={
+    for provider_index, provider in enumerate(providers, start=1):
+        for attempt in range(attempts):
+            try:
+                provider_context = {
+                    "provider": provider.name,
+                    "provider_index": provider_index,
+                    "provider_count": len(providers),
                     "attempt": attempt + 1,
-                    "endpoint": responses_endpoint_url(settings.openai_api_base),
-                    "raw_payload": payload,
-                },
-            )
-            with httpx.stream(
-                "POST",
-                responses_endpoint_url(settings.openai_api_base),
-                headers=headers,
-                json=payload,
-                timeout=settings.openai_timeout,
-            ) as response:
-                _raise_for_http_error(response)
-                text = collect_responses_stream_text(response.iter_lines())
-                _log_llm_response(
+                    "endpoint": responses_endpoint_url(provider.api_base),
+                }
+                _log_llm_request(
                     logger,
                     context=request_context,
-                    text=text,
-                    attempt=attempt + 1,
+                    payload={
+                        **provider_context,
+                        "raw_payload": payload,
+                    },
                 )
-                if not text.strip():
-                    raise EmptyLLMResponseError("Responses API returned empty text")
-                return text
-        except httpx.HTTPStatusError as exc:
-            _log_llm_error(logger, request_context, exc, attempt + 1)
-            status_code = exc.response.status_code
-            if attempt == attempts - 1 or not _is_retryable_status(status_code):
-                raise
-            last_error = exc
-        except httpx.TransportError as exc:
-            _log_llm_error(logger, request_context, exc, attempt + 1)
-            if attempt == attempts - 1:
-                raise
-        except EmptyLLMResponseError as exc:
-            _log_llm_error(logger, request_context, exc, attempt + 1)
-            if attempt == attempts - 1:
-                raise
-            last_error = exc
+                with httpx.stream(
+                    "POST",
+                    responses_endpoint_url(provider.api_base),
+                    headers=_provider_headers(provider),
+                    json=payload,
+                    timeout=settings.openai_timeout,
+                ) as response:
+                    _raise_for_http_error(response)
+                    text = collect_responses_stream_text(response.iter_lines())
+                    _log_llm_response(
+                        logger,
+                        context=request_context,
+                        text=text,
+                        attempt=attempt + 1,
+                        provider=provider,
+                        provider_index=provider_index,
+                    )
+                    if not text.strip():
+                        raise EmptyLLMResponseError(
+                            f"Responses API returned empty text from {provider.name}"
+                        )
+                    return text
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                _log_llm_error(
+                    logger,
+                    request_context,
+                    exc,
+                    attempt + 1,
+                    provider=provider,
+                    provider_index=provider_index,
+                )
+                if _should_try_next_provider(
+                    exc,
+                    attempt=attempt,
+                    attempts=attempts,
+                    provider_index=provider_index,
+                    provider_count=len(providers),
+                ):
+                    break
+                if attempt == attempts - 1 or not _is_retryable_status(
+                    exc.response.status_code
+                ):
+                    raise
+            except (httpx.TransportError, EmptyLLMResponseError) as exc:
+                last_error = exc
+                _log_llm_error(
+                    logger,
+                    request_context,
+                    exc,
+                    attempt + 1,
+                    provider=provider,
+                    provider_index=provider_index,
+                )
+                if attempt == attempts - 1:
+                    if provider_index < len(providers):
+                        break
+                    raise
     raise RuntimeError("Responses API stream ended before a response was returned") from (
         last_error
     )
 
 
 def request_responses_stream_parsed(
+    settings: Settings,
+    payload: dict[str, Any],
+    parser: Callable[[str], T],
+    logger: WorkflowRunLogger | None = None,
+    request_context: str = "responses_stream",
+    database_path: str | Path | None = None,
+) -> T:
+    """Call Responses streaming and retry empty or unparsable model output."""
+
+    return run_with_ai_call_lock(
+        database_path=database_path or settings.productv2_database_path,
+        call_type=f"llm:{request_context}",
+        request={
+            "providers": llm_provider_fingerprint(settings),
+            "payload": payload,
+        },
+        execute=lambda: _request_responses_stream_parsed_unlocked(
+            settings,
+            payload,
+            parser,
+            logger=logger,
+            request_context=request_context,
+        ),
+        result_to_json=_parsed_result_to_json,
+        result_from_json=lambda value: parser(json.dumps(value, ensure_ascii=False)),
+        settings=settings,
+        logger=logger,
+    )
+
+
+def _request_responses_stream_parsed_unlocked(
     settings: Settings,
     payload: dict[str, Any],
     parser: Callable[[str], T],
@@ -244,6 +301,39 @@ def request_responses_stream_parsed(
                 raise
             last_error = exc
     raise RuntimeError("Responses API output could not be parsed") from last_error
+
+
+def _parsed_result_to_json(result: Any) -> dict[str, Any]:
+    if hasattr(result, "model_dump"):
+        dumped = result.model_dump()
+        return dumped if isinstance(dumped, dict) else {"value": dumped}
+    if isinstance(result, dict):
+        return result
+    return {"value": result}
+
+
+def _provider_headers(provider: LLMProvider) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {provider.api_key}",
+        "Accept": "text/event-stream",
+        "Content-Type": "application/json",
+    }
+
+
+def _should_try_next_provider(
+    exc: httpx.HTTPStatusError,
+    *,
+    attempt: int,
+    attempts: int,
+    provider_index: int,
+    provider_count: int,
+) -> bool:
+    if provider_index >= provider_count:
+        return False
+    status_code = exc.response.status_code
+    if _is_retryable_status(status_code):
+        return attempt == attempts - 1
+    return True
 
 
 def responses_endpoint_url(api_base: str) -> str:
@@ -443,6 +533,8 @@ def _log_llm_response(
     context: str,
     text: str,
     attempt: int | None = None,
+    provider: LLMProvider | None = None,
+    provider_index: int | None = None,
 ) -> None:
     if logger is None:
         return
@@ -452,6 +544,11 @@ def _log_llm_response(
     }
     if attempt is not None:
         data["attempt"] = attempt
+    if provider is not None:
+        data["provider"] = provider.name
+        data["endpoint"] = responses_endpoint_url(provider.api_base)
+    if provider_index is not None:
+        data["provider_index"] = provider_index
     logger.write("llm_response", data=data)
 
 
@@ -477,15 +574,20 @@ def _log_llm_error(
     context: str,
     exc: Exception,
     attempt: int,
+    provider: LLMProvider | None = None,
+    provider_index: int | None = None,
 ) -> None:
     if logger is None:
         return
-    logger.write(
-        "llm_error",
-        data={
-            "request_context": context,
-            "attempt": attempt,
-            "error_type": type(exc).__name__,
-            "error": str(exc),
-        },
-    )
+    data: dict[str, Any] = {
+        "request_context": context,
+        "attempt": attempt,
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+    }
+    if provider is not None:
+        data["provider"] = provider.name
+        data["endpoint"] = responses_endpoint_url(provider.api_base)
+    if provider_index is not None:
+        data["provider_index"] = provider_index
+    logger.write("llm_error", data=data)

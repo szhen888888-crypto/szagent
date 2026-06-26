@@ -1,7 +1,9 @@
 from productv2.config import Settings
 from productv2.reference_analysis import (
+    build_enroute_analysis_selection_payload,
     build_enroute_reference_analysis_payload,
     format_model_profile_options,
+    parse_enroute_analysis_selection,
     parse_enroute_reference_analysis,
 )
 
@@ -138,3 +140,63 @@ def test_format_model_profile_options_lists_summary_and_image_path() -> None:
     assert "name=Cool Romantic" in text
     assert "image_path=/tmp/black-model.jpg" in text
     assert "冷静松弛" in text
+
+
+def test_build_enroute_analysis_selection_payload_puts_summaries_in_system_prompt() -> None:
+    payload = build_enroute_analysis_selection_payload(
+        Settings(
+            openai_model="gpt-test",
+            enroute_analysis_temperature=0.7,
+            enroute_analysis_top_p=0.8,
+        ),
+        "data:image/jpeg;base64,main",
+        "data:image/jpeg;base64,size",
+        [
+            {
+                "enroute_product_id": "necklaces:short",
+                "summary": "适合短链，锁骨区域构图明确。",
+            },
+            {
+                "enroute_product_id": "necklaces:long",
+                "summary": "适合长链，需要更宽松的胸前范围。",
+            },
+        ],
+    )
+
+    system_text = payload["input"][0]["content"][0]["text"]
+    user_content = payload["input"][1]["content"]
+
+    assert payload["model"] == "gpt-test"
+    assert payload["stream"] is True
+    assert payload["temperature"] == 0.7
+    assert payload["top_p"] == 0.8
+    assert payload["input"][0]["role"] == "system"
+    assert "逆向 JSON 摘要列表" in system_text
+    assert "necklaces:short" in system_text
+    assert "适合短链" in system_text
+    assert "长 / 中 / 短" in system_text
+    assert user_content[0]["type"] == "input_text"
+    assert user_content[1] == {
+        "type": "input_image",
+        "image_url": "data:image/jpeg;base64,main",
+        "detail": "high",
+    }
+    assert user_content[2] == {
+        "type": "input_image",
+        "image_url": "data:image/jpeg;base64,size",
+        "detail": "high",
+    }
+
+
+def test_parse_enroute_analysis_selection_reads_minimal_json() -> None:
+    selection = parse_enroute_analysis_selection(
+        """
+        {
+          "selected_enroute_product_id": "necklaces:short",
+          "reason": "当前尺寸参考更接近短链构图"
+        }
+        """
+    )
+
+    assert selection.selected_enroute_product_id == "necklaces:short"
+    assert selection.reason == "当前尺寸参考更接近短链构图"

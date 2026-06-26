@@ -1,783 +1,594 @@
-import json
+import pytest
 import sqlite3
 from pathlib import Path
+import json
 
 from PIL import Image
 
 import productv2.graph as graph_module
-from productv2.graph import run_listing_workflow
-from productv2.state import get_extra
+from productv2.dev_graph import product_listing
+from productv2.graph import MAX_WEARING_REGENERATE_ATTEMPTS
+from productv2.graph import _route_manual_review_decision
+from productv2.graph import build_listing_graph
+from productv2.graph import compile_listing_graph
+from productv2.reference_analysis import EnrouteAnalysisSelection
+from productv2.vision import SizeReferenceDetection
+from productv2.wearing import save_generated_wearing_image
 
 
-def test_listing_workflow_builds_drafts_from_candidate_data(tmp_path) -> None:
-    data_path = tmp_path / "candidates.json"
-    log_dir = tmp_path / "logs"
-    data_path.write_text(
+def _write_enroute_reference(root: Path, category: str, name: str) -> Path:
+    product_dir = root / category / name
+    product_dir.mkdir(parents=True)
+    Image.new("RGB", (10, 10), "white").save(product_dir / "02.jpg")
+    (product_dir / "metadata.json").write_text(
         json.dumps(
-            [
-                {
-                    "product_id": "fixture-1",
-                    "platform": "1688",
-                    "rawdata": {
-                        "title": "Fixture Product 1",
-                        "url": "https://example.test/fixture-1",
-                    },
-                },
-                {
-                    "product_id": "fixture-2",
-                    "platform": "1688",
-                    "rawdata": {
-                        "title": "Fixture Product 2",
-                        "url": "https://example.test/fixture-2",
-                    },
-                },
-            ],
-            ensure_ascii=False,
+            {
+                "product_id": f"{category}:{name}",
+                "handle": name,
+                "title": name,
+            }
         ),
         encoding="utf-8",
     )
-
-    result = run_listing_workflow(data_path=data_path, limit=2, workflow_logs_dir=log_dir)
-
-    assert result["metrics"]["candidate_count"] == 2
-    assert result["metrics"]["draft_count"] == 2
-    assert len(result["drafts"]) == 2
-    assert result["drafts"][0]["product_id"]
-    assert result["drafts"][0]["title"]
-    log_path = Path(result["metrics"]["workflow_log_path"])
-    assert log_path.exists()
-    assert log_path.parent == log_dir
-    assert log_path.suffix == ".log"
-    assert log_path.name.startswith("Fixture Product 1__1688__fixture-1")
-    log_text = log_path.read_text(encoding="utf-8")
-    assert "事件：工作流开始" in log_text
-    assert "事件：逻辑单元开始" in log_text
-    assert "逻辑单元：load_candidates" in log_text
-    assert "事件：逻辑单元结束" in log_text
-    assert "逻辑单元：prepare_review_queue" in log_text
-    assert "事件：工作流结束" in log_text
+    return product_dir
 
 
-def test_listing_workflow_uses_database_when_no_data_path(tmp_path) -> None:
+def _candidate_state(database_path: Path, enroute_dir: Path) -> dict:
+    return {
+        "database_path": str(database_path),
+        "enroute_bestsellers_dir": str(enroute_dir),
+        "candidates": [
+            {
+                "id": 1,
+                "product_id": "p-1",
+                "platform": "1688",
+                "rawdata": {"title": "Layered necklace"},
+                "status": "processing",
+                "main_image": "",
+                "wearing_image": "",
+                "detail_image": "",
+                "size_ratio_image": "",
+                "multi_angle_image": "",
+                "locked_at": "",
+                "locked_by": "",
+                "created_at": "",
+                "updated_at": "",
+            }
+        ],
+    }
+
+
+def test_dev_graph_exports_compiled_product_listing_graph() -> None:
+    assert product_listing is not None
+    assert type(product_listing).__name__ == "CompiledStateGraph"
+
+
+def test_build_listing_graph_contains_manual_review_nodes() -> None:
+    graph = build_listing_graph()
+    compiled = graph.compile()
+
+    assert type(compiled).__name__ == "CompiledStateGraph"
+    assert "wait_manual_review" in graph.nodes
+    assert "mark_failed_and_reload_candidates" in graph.nodes
+
+
+def test_manual_review_router_branches_by_action() -> None:
+    assert _route_manual_review_decision(
+        {"manual_review_decision": {"action": "approve"}}
+    ) == "build_listing_drafts"
+    assert _route_manual_review_decision(
+        {
+            "manual_review_decision": {"action": "regenerate"},
+            "wearing_generation_attempt": 1,
+        }
+    ) == "generate_wearing_image"
+    assert _route_manual_review_decision(
+        {
+            "manual_review_decision": {"action": "regenerate"},
+            "wearing_generation_attempt": MAX_WEARING_REGENERATE_ATTEMPTS,
+        }
+    ) == "mark_failed_and_reload_candidates"
+    assert _route_manual_review_decision(
+        {"manual_review_decision": {"action": "reject"}}
+    ) == "mark_failed_and_reload_candidates"
+
+
+def test_mark_failed_and_reload_candidates_updates_database(tmp_path) -> None:
     database_path = tmp_path / "productv2.db"
+    from productv2.db import init_database
 
-    from productv2.db import seed_candidate_products
+    init_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO products (
+                product_id, platform, rawdata, status, locked_at, locked_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("p-1", "1688", "{}", "processing", "2026-01-01T00:00:00", "worker"),
+        )
 
-    data_path = tmp_path / "candidates.json"
-    data_path.write_text(
-        json.dumps(
-            [
+    output = graph_module._mark_failed_and_reload_candidates(
+        {
+            "database_path": str(database_path),
+            "candidates": [
                 {
-                    "product_id": "db-fixture-1",
+                    "id": 1,
+                    "product_id": "p-1",
                     "platform": "1688",
-                    "rawdata": {
-                        "title": "Database Fixture Product",
-                        "url": "https://example.test/db-fixture-1",
-                    },
+                    "rawdata": {},
+                    "status": "processing",
+                    "main_image": "",
+                    "wearing_image": "",
+                    "detail_image": "",
+                    "size_ratio_image": "",
+                    "multi_angle_image": "",
+                    "locked_at": "2026-01-01T00:00:00",
+                    "locked_by": "worker",
+                    "created_at": "",
+                    "updated_at": "",
                 }
             ],
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+            "manual_review_decision": {"reason": "人工拒绝"},
+        }
     )
-    seed_candidate_products(database_path=database_path, data_path=data_path)
 
-    result = run_listing_workflow(database_path=database_path, limit=1)
-
-    assert result["metrics"]["candidate_source"] == "database_adapter_selection"
-    assert result["metrics"]["candidate_count"] == 1
-    assert result["metrics"]["unfinished_count"] == 1
-    assert result["metrics"]["selected_adapter"] == "1688"
-    assert result["metrics"]["skipped_without_adapter_count"] == 0
-    assert result["metrics"]["main_image_result"]["status"] == "failed"
-    assert result["metrics"]["size_reference_result"]["status"] == "skipped"
-    assert result["drafts"][0]["product_id"] == "db-fixture-1"
-
-
-def test_listing_workflow_rejects_explicit_missing_data_path(tmp_path) -> None:
-    missing_data_path = tmp_path / "missing.json"
-
-    try:
-        run_listing_workflow(data_path=missing_data_path, database_path=tmp_path / "db.sqlite")
-    except FileNotFoundError as exc:
-        assert str(missing_data_path) in str(exc)
-    else:
-        raise AssertionError("Expected missing explicit data_path to fail")
+    assert output["failed_product"]["status"] == "failed"
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT status, locked_at, locked_by
+            FROM products
+            WHERE product_id = ? AND platform = ?
+            """,
+            ("p-1", "1688"),
+        ).fetchone()
+    assert row == ("failed", None, None)
 
 
-def test_listing_workflow_merges_main_images_without_updating_database(
+def test_mark_failed_and_reload_candidates_propagates_database_errors(
+    monkeypatch,
+) -> None:
+    def fake_update_product_fields(**_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(
+        graph_module,
+        "update_product_fields",
+        fake_update_product_fields,
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        graph_module._mark_failed_and_reload_candidates(
+            {
+                "database_path": "/tmp/missing.db",
+                "candidates": [
+                    {
+                        "id": 1,
+                        "product_id": "p-1",
+                        "platform": "1688",
+                        "rawdata": {},
+                        "status": "processing",
+                        "main_image": "",
+                        "wearing_image": "",
+                        "detail_image": "",
+                        "size_ratio_image": "",
+                        "multi_angle_image": "",
+                        "locked_at": "",
+                        "locked_by": "",
+                        "created_at": "",
+                        "updated_at": "",
+                    }
+                ],
+                "manual_review_decision": {"reason": "人工拒绝"},
+            }
+        )
+
+
+def test_save_generated_wearing_image_uses_attempt_name(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (10, 10), "red").save(source)
+
+    import base64
+
+    data_url = (
+        "data:image/png;base64,"
+        + base64.b64encode(source.read_bytes()).decode("ascii")
+    )
+    output = save_generated_wearing_image(data_url, tmp_path, attempt=2)
+
+    assert output == tmp_path / "wearing_image_attempt_2.png"
+    assert output.exists()
+
+
+def test_merge_main_images_download_failure_stops_without_failed_state(
     monkeypatch,
     tmp_path,
 ) -> None:
-    database_path = tmp_path / "productv2.db"
-    assets_dir = tmp_path / "products"
-    log_dir = tmp_path / "logs"
-    model_profiles_dir = tmp_path / "model_profiles"
-    model_dir = model_profiles_dir / "romantic_rebel_european"
-    model_dir.mkdir(parents=True)
-    model_image_path = model_dir / "model.jpg"
-    model_metadata_path = model_dir / "metadata.json"
-    Image.new("RGB", (64, 64), "blue").save(model_image_path)
-    model_metadata_path.write_text("{}", encoding="utf-8")
+    def fake_merge_remote_images_to_numbered_collage(**_kwargs):
+        raise ValueError("No downloadable images available for collage.")
 
-    from productv2.db import seed_candidate_products
-
-    data_path = tmp_path / "candidates.json"
-    data_path.write_text(
-        json.dumps(
-            [
-                {
-                    "product_id": "db-fixture-2",
-                    "platform": "1688",
-                    "rawdata": {
-                        "title": "Database Fixture Product",
-                        "url": "https://example.test/db-fixture-2",
-                        "detail": {
-                            "image_urls": [
-                                "https://cbu01.alicdn.com/img/ibank/a.jpg_.webp"
-                            ]
-                        },
-                    },
-                }
-            ],
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    monkeypatch.setattr(
+        graph_module,
+        "merge_remote_images_to_numbered_collage",
+        fake_merge_remote_images_to_numbered_collage,
     )
-    seed_candidate_products(database_path=database_path, data_path=data_path)
 
-    def fake_merge_remote_images_to_collage(image_urls, output_path, **_kwargs):
-        assert image_urls == ["https://cbu01.alicdn.com/img/ibank/a.jpg_.webp"]
-        Image.new("RGB", (64, 64), "white").save(output_path)
-        from productv2.images import ImageCollageResult, NumberedImageSource
+    state = {
+        "product_assets_dir": str(tmp_path),
+        "candidates": [
+            {
+                "id": 1,
+                "product_id": "p-1",
+                "platform": "1688",
+                "rawdata": {
+                    "title": "Layered necklace",
+                    "detail": {"image_urls": ["https://example.test/missing.jpg"]},
+                },
+                "status": "processing",
+                "main_image": "",
+                "wearing_image": "",
+                "detail_image": "",
+                "size_ratio_image": "",
+                "multi_angle_image": "",
+                "locked_at": "",
+                "locked_by": "",
+                "created_at": "",
+                "updated_at": "",
+            }
+        ],
+    }
 
-        source_dir = output_path.parent / "main_image_sources"
-        source_dir.mkdir(parents=True, exist_ok=True)
-        Image.new("RGB", (64, 64), "white").save(source_dir / "1.jpg")
-        Image.new("RGB", (64, 64), "white").save(source_dir / "2.jpg")
-        return ImageCollageResult(
-            path=output_path,
-            source_images=[
-                NumberedImageSource(
-                    index=1,
-                    url="https://cbu01.alicdn.com/img/ibank/a.jpg_.webp",
-                    path=source_dir / "1.jpg",
-                ),
-                NumberedImageSource(
-                    index=2,
-                    url="https://cbu01.alicdn.com/img/ibank/a-main.jpg_.webp",
-                    path=source_dir / "2.jpg",
-                )
-            ],
-        )
+    with pytest.raises(ValueError, match="No downloadable images"):
+        graph_module._merge_main_images(state)
 
-    def fake_detect_size_reference_images(collage_path):
-        from productv2.vision import SizeReferenceDetection
+    assert "main_image_result" not in state
 
-        assert collage_path == str(
-            assets_dir / "1688" / "db-fixture-2" / "main_image_collage.jpg"
-        )
+
+def test_size_reference_detection_result_is_checkpointed(monkeypatch, tmp_path) -> None:
+    collage = tmp_path / "main_image_collage.jpg"
+    source_dir = tmp_path / "main_image_sources"
+    source_dir.mkdir()
+    size_ref = source_dir / "1.jpg"
+    main = source_dir / "2.jpg"
+    Image.new("RGB", (10, 10), "white").save(collage)
+    Image.new("RGB", (10, 10), "gray").save(size_ref)
+    Image.new("RGB", (10, 10), "blue").save(main)
+    calls = {"count": 0}
+
+    def fake_detect_size_reference_images(_collage_path, logger=None):
+        calls["count"] += 1
         return SizeReferenceDetection(
             can_judge_size=True,
             image_numbers=[1],
             size_reference_image_number=1,
             main_image_number=2,
-            reason="有模特佩戴图",
+            reason="有参照",
         )
 
-    def fake_select_enroute_wearing_reference(candidate, library_dir):
-        from productv2.enroute import EnrouteReference
-
-        reference_dir = tmp_path / "enroute" / "necklaces" / "01-reference"
-        reference_dir.mkdir(parents=True, exist_ok=True)
-        reference_path = reference_dir / "02.jpg"
-        Image.new("RGB", (64, 64), "white").save(reference_path)
-        return EnrouteReference(
-            product_id="enroute-reference-1",
-            category="necklaces",
-            product_dir=reference_dir,
-            image_path=reference_path,
-            metadata={
-                "title": "Reference Necklace",
-                "handle": "reference-necklace",
-                "product_type": "Necklaces",
-                "source_url": "https://example.test/reference-necklace",
-            },
-        )
-
-    def fake_analyze_enroute_reference_image(image_path, **kwargs):
-        assert kwargs["model_profiles"]
-        from productv2.reference_analysis import EnrouteReferenceAnalysis
-        from productv2.reference_analysis import ClothingStyleAnalysis
-        from productv2.reference_analysis import SceneStyleAnalysis
-        from productv2.reference_analysis import ShootingStyleAnalysis
-
-        return EnrouteReferenceAnalysis(
-            is_valid_wearing_reference=True,
-            summary="LLM 摘要：短链适配强，锁骨链适配强，中长链可用，长链需要更宽构图。",
-            selected_model_profile={
-                "profile_key": "romantic_rebel_european",
-                "name": "Romantic Rebel",
-                "image_path": str(model_image_path),
-                "reason": "冷淡松弛气质匹配",
-            },
-            clothing_style=ClothingStyleAnalysis(
-                category="细肩带基础上装",
-                fabric_texture="细密棉质纹理",
-                styling_keywords=["低饱和", "日常新浪漫"],
-            ),
-            scene_style=SceneStyleAnalysis(background_feel="简洁低干扰"),
-            shooting_style=ShootingStyleAnalysis(
-                shot_type="collarbone crop",
-                framing="下半脸到锁骨",
-                lighting="柔和窗光",
-            ),
-            reason=f"参考图可用：{image_path}",
-        )
-
-    monkeypatch.setattr(
-        graph_module,
-        "merge_remote_images_to_numbered_collage",
-        fake_merge_remote_images_to_collage,
-    )
     monkeypatch.setattr(
         graph_module,
         "detect_size_reference_images",
         fake_detect_size_reference_images,
     )
-    monkeypatch.setattr(
-        graph_module,
-        "select_enroute_wearing_reference",
-        fake_select_enroute_wearing_reference,
-    )
-    monkeypatch.setattr(
-        graph_module,
-        "analyze_enroute_reference_image",
-        fake_analyze_enroute_reference_image,
-    )
 
-    result = run_listing_workflow(
-        database_path=database_path,
-        product_assets_dir=assets_dir,
-        model_profiles_dir=model_profiles_dir,
-        workflow_logs_dir=log_dir,
-        limit=1,
-    )
-
-    collage_path = assets_dir / "1688" / "db-fixture-2" / "main_image_collage.jpg"
-    assert result["metrics"]["main_image_result"]["status"] == "ok"
-    assert result["metrics"]["main_image_result"]["path"] == str(collage_path)
-    assert result["metrics"]["main_image_result"]["temporary"] is True
-    assert result["metrics"]["main_image_result"]["numbered_sources"] == [
-        {
-            "index": 1,
-            "url": "https://cbu01.alicdn.com/img/ibank/a.jpg_.webp",
-            "path": str(collage_path.parent / "main_image_sources" / "1.jpg"),
+    state = {
+        "selected_product": {
+            "id": 1,
+            "product_id": "p-1",
+            "platform": "1688",
+            "status": "processing",
         },
-        {
-            "index": 2,
-            "url": "https://cbu01.alicdn.com/img/ibank/a-main.jpg_.webp",
-            "path": str(collage_path.parent / "main_image_sources" / "2.jpg"),
-        },
-    ]
-    assert result["metrics"]["size_reference_result"] == {
-        "status": "ok",
-        "can_judge_size": True,
-        "image_numbers": [1],
-        "size_reference_image_number": 1,
-        "main_image_number": 2,
-        "selected_images": {
-            "size_reference_image": {
-                "number": 1,
-                "path": str(collage_path.parent / "main_image_sources" / "1.jpg"),
-                "url": "https://cbu01.alicdn.com/img/ibank/a.jpg_.webp",
-            },
-            "main_image": {
-                "number": 2,
-                "path": str(collage_path.parent / "main_image_sources" / "2.jpg"),
-                "url": "https://cbu01.alicdn.com/img/ibank/a-main.jpg_.webp",
-            },
-        },
-        "reason": "有模特佩戴图",
-    }
-    reference_path = tmp_path / "enroute" / "necklaces" / "01-reference" / "02.jpg"
-    assert result["metrics"]["enroute_reference_result"] == {
-        "status": "ok",
-        "enroute_product_id": "enroute-reference-1",
-        "category": "necklaces",
-        "image_path": str(reference_path),
-        "product_dir": str(reference_path.parent),
-        "metadata": {
-            "title": "Reference Necklace",
-            "handle": "reference-necklace",
-            "product_type": "Necklaces",
-            "source_url": "https://example.test/reference-necklace",
-        },
-    }
-    assert result["metrics"]["enroute_analysis_result"]["status"] == "ok"
-    assert result["metrics"]["enroute_analysis_result"]["cache"] == "miss"
-    assert result["metrics"]["enroute_analysis_result"]["enroute_product_id"] == (
-        "enroute-reference-1"
-    )
-    assert result["metrics"]["enroute_analysis_result"]["reference_image_path"] == str(
-        reference_path
-    )
-    assert result["metrics"]["enroute_analysis_result"]["summary"] == (
-        "LLM 摘要：短链适配强，锁骨链适配强，中长链可用，长链需要更宽构图。"
-    )
-    assert result["metrics"]["enroute_analysis_result"]["analysis"][
-        "clothing_style"
-    ]["styling_keywords"] == ["低饱和", "日常新浪漫"]
-    assert result["metrics"]["enroute_analysis_result"]["analysis"][
-        "scene_style"
-    ]["background_feel"] == "简洁低干扰"
-    assert result["metrics"]["enroute_analysis_result"]["analysis"][
-        "shooting_style"
-    ]["shot_type"] == "collarbone crop"
-    assert result["metrics"]["enroute_analysis_result"]["analysis"][
-        "selected_model_profile"
-    ]["profile_key"] == "romantic_rebel_european"
-    log_path = Path(result["metrics"]["workflow_log_path"])
-    log_text = log_path.read_text(encoding="utf-8")
-    assert "事件：分支判断" in log_text
-    assert "逻辑单元：detect_size_reference" in log_text
-    assert "- 分支逻辑 (branch): select_enroute_reference" in log_text
-    assert "逻辑单元：analyze_enroute_reference" in log_text
-    assert (
-        f"- enroute_analysis_result.reference_image_path: {reference_path}"
-        in log_text
-    )
-    wearing_result = result["metrics"]["wearing_image_result"]
-    assert wearing_result["status"] == "reserved"
-    assert wearing_result["reason"] == "wearing_image_generation_not_implemented"
-    assert wearing_result["product_id"] == "db-fixture-2"
-    assert wearing_result["platform"] == "1688"
-    assert wearing_result["size_reference_image_numbers"] == [1]
-    assert wearing_result["marked_main_image_path"] == str(
-        collage_path.parent / "wearing_generation_inputs" / "01_main_image.jpg"
-    )
-    assert wearing_result["marked_size_reference_image_path"] == str(
-        collage_path.parent
-        / "wearing_generation_inputs"
-        / "02_size_reference.jpg"
-    )
-    assert wearing_result["enroute_reference_image_path"] == str(reference_path)
-    assert "参考图 01 标记为主图" in wearing_result["prompt"]
-    assert "参考图 02 标记为尺寸参考图" in wearing_result["prompt"]
-    assert wearing_result["selected_model_profile"]["profile_key"] == (
-        "romantic_rebel_european"
-    )
-    assert str(model_image_path) in wearing_result["input_images"]
-    assert "产品一致性" in wearing_result["prompt"]
-    assert "尺寸一致性" in wearing_result["prompt"]
-    assert collage_path.exists()
-    assert Path(wearing_result["marked_main_image_path"]).exists()
-    assert Path(wearing_result["marked_size_reference_image_path"]).exists()
-    assert get_extra("main_image_collage")["path"] == str(collage_path)
-    assert get_extra("size_reference_detection")["image_numbers"] == [1]
-    assert get_extra("selected_size_reference_image_path") == str(
-        collage_path.parent / "main_image_sources" / "1.jpg"
-    )
-    assert get_extra("selected_main_image_path") == str(
-        collage_path.parent / "main_image_sources" / "2.jpg"
-    )
-    assert get_extra("selected_product_images") == {
-        "size_reference_image": {
-            "number": 1,
-            "path": str(collage_path.parent / "main_image_sources" / "1.jpg"),
-            "url": "https://cbu01.alicdn.com/img/ibank/a.jpg_.webp",
-        },
-        "main_image": {
-            "number": 2,
-            "path": str(collage_path.parent / "main_image_sources" / "2.jpg"),
-            "url": "https://cbu01.alicdn.com/img/ibank/a-main.jpg_.webp",
-        },
-    }
-    assert get_extra("selected_enroute_reference_image_path") == str(reference_path)
-    assert get_extra("selected_enroute_reference_metadata")["title"] == (
-        "Reference Necklace"
-    )
-    assert get_extra("enroute_reference_analysis")["analysis"]["clothing_style"][
-        "category"
-    ] == "细肩带基础上装"
-    assert get_extra("wearing_image_generation")["status"] == "reserved"
-
-    with sqlite3.connect(database_path) as connection:
-        row = connection.execute(
-            """
-            SELECT main_image, wearing_image
-            FROM products
-            WHERE product_id = ? AND platform = ?
-            """,
-            ("db-fixture-2", "1688"),
-        ).fetchone()
-
-    assert row[0] == ""
-    assert row[1] == ""
-
-    with sqlite3.connect(database_path) as connection:
-        connection.row_factory = sqlite3.Row
-        cached = connection.execute(
-            """
-            SELECT enroute_product_id, enroute_category, summary, analysis_json
-            FROM enroute_image_analyses
-            WHERE enroute_product_id = ?
-            """,
-            ("enroute-reference-1",),
-        ).fetchone()
-
-    assert cached["enroute_product_id"] == "enroute-reference-1"
-    assert cached["enroute_category"] == "necklaces"
-    assert cached["summary"] == (
-        "LLM 摘要：短链适配强，锁骨链适配强，中长链可用，长链需要更宽构图。"
-    )
-    assert json.loads(cached["analysis_json"])["clothing_style"]["category"] == (
-        "细肩带基础上装"
-    )
-
-
-def test_listing_workflow_marks_llm_failure_and_reselects_next_product(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    database_path = tmp_path / "productv2.db"
-    assets_dir = tmp_path / "products"
-
-    from productv2.db import init_database
-
-    init_database(database_path)
-    with sqlite3.connect(database_path) as connection:
-        connection.executemany(
-            """
-            INSERT INTO products (product_id, platform, rawdata, status)
-            VALUES (?, ?, ?, ?)
-            """,
-            [
-                (
-                    "retry-first",
-                    "1688",
-                    json.dumps(
-                        {
-                            "title": "First Product",
-                            "url": "https://example.test/retry-first",
-                            "detail": {
-                                "image_urls": [
-                                    "https://cbu01.alicdn.com/img/ibank/first.jpg_.webp"
-                                ]
-                            },
-                        }
-                    ),
-                    "all_pendding",
-                ),
-                (
-                    "retry-second",
-                    "1688",
-                    json.dumps(
-                        {
-                            "title": "Second Product",
-                            "url": "https://example.test/retry-second",
-                            "detail": {
-                                "image_urls": [
-                                    "https://cbu01.alicdn.com/img/ibank/second.jpg_.webp"
-                                ]
-                            },
-                        }
-                    ),
-                    "all_pendding",
-                ),
+        "main_image_result": {
+            "status": "ok",
+            "path": str(collage),
+            "source_image_count": 2,
+            "numbered_sources": [
+                {"index": 1, "path": str(size_ref), "url": "https://example.test/1.jpg"},
+                {"index": 2, "path": str(main), "url": "https://example.test/2.jpg"},
             ],
-        )
+        },
+    }
 
-    class NoShuffleRandom:
-        def shuffle(self, values):
-            return None
+    first = graph_module._detect_size_reference(state)
+    second = graph_module._detect_size_reference({**state, **first})
 
-    monkeypatch.setattr("productv2.selection.random.Random", lambda: NoShuffleRandom())
+    assert calls["count"] == 1
+    assert "detect_size_reference" in first["ai_checkpoints"]
+    assert second["size_reference_result"]["checkpoint"] == "hit"
 
-    def fake_merge_remote_images_to_collage(image_urls, output_path, **_kwargs):
-        Image.new("RGB", (64, 64), "white").save(output_path)
-        from productv2.images import ImageCollageResult, NumberedImageSource
 
-        source_dir = output_path.parent / "main_image_sources"
-        source_dir.mkdir(parents=True, exist_ok=True)
-        Image.new("RGB", (64, 64), "white").save(source_dir / "1.jpg")
-        return ImageCollageResult(
-            path=output_path,
-            source_images=[
-                NumberedImageSource(
-                    index=1,
-                    url=image_urls[0],
-                    path=source_dir / "1.jpg",
-                )
-            ],
-        )
+def test_failed_size_reference_checkpoint_is_not_reused(monkeypatch, tmp_path) -> None:
+    collage = tmp_path / "main_image_collage.jpg"
+    Image.new("RGB", (10, 10), "white").save(collage)
+    calls = {"count": 0}
 
-    detect_calls = []
-
-    def fake_detect_size_reference_images(collage_path):
-        from productv2.vision import SizeReferenceDetection
-
-        detect_calls.append(str(collage_path))
-        if "retry-first" in str(collage_path):
-            raise RuntimeError("llm failed")
+    def fake_detect_size_reference_images(_collage_path, logger=None):
+        calls["count"] += 1
         return SizeReferenceDetection(
             can_judge_size=True,
             image_numbers=[1],
             size_reference_image_number=1,
             main_image_number=1,
-            reason="第二条有佩戴参照",
+            reason="重试成功",
         )
 
-    def fake_select_enroute_wearing_reference(candidate, library_dir):
-        from productv2.enroute import EnrouteReference
-
-        reference_dir = tmp_path / "enroute" / "necklaces" / "02-reference"
-        reference_dir.mkdir(parents=True, exist_ok=True)
-        reference_path = reference_dir / "02.jpg"
-        Image.new("RGB", (64, 64), "white").save(reference_path)
-        return EnrouteReference(
-            product_id="enroute-reference-2",
-            category="necklaces",
-            product_dir=reference_dir,
-            image_path=reference_path,
-            metadata={"title": "Retry Reference"},
-        )
-
-    def fake_analyze_enroute_reference_image(image_path, **_kwargs):
-        from productv2.reference_analysis import EnrouteReferenceAnalysis
-        from productv2.reference_analysis import ShootingStyleAnalysis
-
-        return EnrouteReferenceAnalysis(
-            is_valid_wearing_reference=True,
-            summary="LLM 摘要：适合项链短链和锁骨链。",
-            selected_model_profile={
-                "profile_key": "romantic_rebel_european",
-                "name": "Romantic Rebel",
-                "image_path": "/tmp/model.jpg",
-                "reason": "冷淡松弛气质匹配",
-            },
-            shooting_style=ShootingStyleAnalysis(shot_type="collarbone crop"),
-            reason=f"参考图可用：{image_path}",
-        )
-
-    monkeypatch.setattr(
-        graph_module,
-        "merge_remote_images_to_numbered_collage",
-        fake_merge_remote_images_to_collage,
-    )
     monkeypatch.setattr(
         graph_module,
         "detect_size_reference_images",
         fake_detect_size_reference_images,
     )
-    monkeypatch.setattr(
-        graph_module,
-        "select_enroute_wearing_reference",
-        fake_select_enroute_wearing_reference,
-    )
-    monkeypatch.setattr(
-        graph_module,
-        "analyze_enroute_reference_image",
-        fake_analyze_enroute_reference_image,
-    )
 
-    result = run_listing_workflow(
-        database_path=database_path,
-        product_assets_dir=assets_dir,
-        limit=1,
-    )
-
-    assert len(detect_calls) == 2
-    assert result["drafts"][0]["product_id"] == "retry-second"
-    assert result["metrics"]["size_reference_result"] == {
-        "status": "ok",
-        "can_judge_size": True,
-        "image_numbers": [1],
-        "size_reference_image_number": 1,
-        "main_image_number": 1,
-        "selected_images": {
-            "size_reference_image": {
-                "number": 1,
-                "path": str(
-                    assets_dir
-                    / "1688"
-                    / "retry-second"
-                    / "main_image_sources"
-                    / "1.jpg"
-                ),
-                "url": "https://cbu01.alicdn.com/img/ibank/second.jpg_.webp",
-            },
-            "main_image": {
-                "number": 1,
-                "path": str(
-                    assets_dir
-                    / "1688"
-                    / "retry-second"
-                    / "main_image_sources"
-                    / "1.jpg"
-                ),
-                "url": "https://cbu01.alicdn.com/img/ibank/second.jpg_.webp",
-            },
+    state = {
+        "selected_product": {
+            "id": 1,
+            "product_id": "p-1",
+            "platform": "1688",
+            "status": "processing",
         },
-        "reason": "第二条有佩戴参照",
+        "main_image_result": {
+            "status": "ok",
+            "path": str(collage),
+            "source_image_count": 1,
+            "numbered_sources": [{"index": 1, "path": str(collage), "url": ""}],
+        },
     }
-    assert result["metrics"]["wearing_image_result"]["status"] == "reserved"
-    assert result["metrics"]["wearing_image_result"]["product_id"] == "retry-second"
-    assert result["metrics"]["enroute_analysis_result"]["status"] == "ok"
-    assert result["metrics"]["enroute_analysis_result"]["analysis"]["shooting_style"][
-        "shot_type"
-    ] == "collarbone crop"
+    checkpoint_input = graph_module._checkpoint_input(
+        product=graph_module._selected_product_identity(state),
+        collage_path=str(collage),
+        source_image_count=1,
+        numbered_sources=[{"index": 1, "path": str(collage), "url": ""}],
+    )
+    state["ai_checkpoints"] = {
+        "detect_size_reference": graph_module._build_ai_checkpoint(
+            checkpoint_key="detect_size_reference",
+            checkpoint_input=checkpoint_input,
+            checkpoint_result={"status": "failed", "reason": "HTTP 503"},
+            source="llm_error",
+        )
+    }
 
-    with sqlite3.connect(database_path) as connection:
-        rows = {
-            row[0]: row[1:]
-            for row in connection.execute(
-                """
-                SELECT product_id, status, locked_at, locked_by
-                FROM products
-                ORDER BY id
-                """
-            ).fetchall()
+    output = graph_module._detect_size_reference(state)
+
+    assert calls["count"] == 1
+    assert output["size_reference_result"]["status"] == "ok"
+    assert "checkpoint" not in output["size_reference_result"]
+
+
+def test_size_reference_detection_exception_stops_without_failed_state(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    collage = tmp_path / "main_image_collage.jpg"
+    Image.new("RGB", (10, 10), "white").save(collage)
+
+    def fake_detect_size_reference_images(_collage_path, logger=None):
+        raise RuntimeError("HTTP 503")
+
+    monkeypatch.setattr(
+        graph_module,
+        "detect_size_reference_images",
+        fake_detect_size_reference_images,
+    )
+
+    state = {
+        "selected_product": {
+            "id": 1,
+            "product_id": "p-1",
+            "platform": "1688",
+            "status": "processing",
+        },
+        "main_image_result": {
+            "status": "ok",
+            "path": str(collage),
+            "source_image_count": 1,
+            "numbered_sources": [{"index": 1, "path": str(collage), "url": ""}],
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        graph_module._detect_size_reference(state)
+
+    assert "size_reference_result" not in state
+    assert "failed_product" not in state
+
+
+def test_wearing_image_generation_result_is_checkpointed(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    generated = tmp_path / "wearing_image_attempt_1.png"
+    generated.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (10, 10), "green").save(generated)
+    calls = {"count": 0}
+
+    def fake_generate_wearing_image(*_args, **_kwargs):
+        calls["count"] += 1
+        return {
+            "status": "ok",
+            "reason": "wearing_image_generated",
+            "generated_image_path": str(generated),
+            "attempt": 1,
         }
 
-    assert rows["retry-first"] == ("failed", None, None)
-    assert rows["retry-second"][0] == "processing"
-    assert rows["retry-second"][1] is not None
-    assert rows["retry-second"][2] is not None
+    monkeypatch.setattr(
+        graph_module,
+        "generate_wearing_image",
+        fake_generate_wearing_image,
+    )
+    state = {
+        "selected_product": {
+            "id": 1,
+            "product_id": "p-1",
+            "platform": "1688",
+            "status": "processing",
+        },
+        "candidates": [
+            {
+                "id": 1,
+                "product_id": "p-1",
+                "platform": "1688",
+                "rawdata": {},
+                "status": "processing",
+                "main_image": "",
+                "wearing_image": "",
+                "detail_image": "",
+                "size_ratio_image": "",
+                "multi_angle_image": "",
+                "locked_at": "",
+                "locked_by": "",
+                "created_at": "",
+                "updated_at": "",
+            }
+        ],
+        "product_assets_dir": str(tmp_path),
+        "size_reference_result": {
+            "status": "ok",
+            "selected_images": {
+                "main_image": {"path": str(tmp_path / "main.jpg")},
+                "size_reference_image": {"path": str(tmp_path / "size.jpg")},
+            },
+        },
+        "enroute_analysis_result": {
+            "status": "ok",
+            "summary": "适合短链",
+        },
+    }
+
+    first = graph_module._generate_wearing_image(state)
+    second = graph_module._generate_wearing_image({**state, **first})
+
+    assert calls["count"] == 1
+    assert "generate_wearing_image_attempt_1" in first["ai_checkpoints"]
+    assert second["wearing_image_result"]["checkpoint"] == "hit"
 
 
-def test_listing_workflow_uses_cached_enroute_analysis(
+def test_enroute_analysis_invalid_selection_stops_without_failed_state(
     monkeypatch,
     tmp_path,
 ) -> None:
     database_path = tmp_path / "productv2.db"
-    assets_dir = tmp_path / "products"
+    from productv2.db import init_database, upsert_enroute_image_analysis
 
-    from productv2.db import seed_candidate_products
-    from productv2.db import upsert_enroute_image_analysis
-
-    data_path = tmp_path / "candidates.json"
-    data_path.write_text(
-        json.dumps(
-            [
-                {
-                    "product_id": "db-fixture-cache",
-                    "platform": "1688",
-                    "rawdata": {
-                        "title": "Cached Necklace Product",
-                        "url": "https://example.test/db-fixture-cache",
-                        "detail": {
-                            "image_urls": [
-                                "https://cbu01.alicdn.com/img/ibank/cache.jpg_.webp"
-                            ]
-                        },
-                    },
-                }
-            ],
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    seed_candidate_products(database_path=database_path, data_path=data_path)
+    init_database(database_path)
+    main = tmp_path / "main.jpg"
+    size = tmp_path / "size.jpg"
+    Image.new("RGB", (10, 10), "white").save(main)
+    Image.new("RGB", (10, 10), "gray").save(size)
     upsert_enroute_image_analysis(
         database_path,
-        enroute_product_id="cached-enroute-1",
+        enroute_product_id="necklaces:cached",
         enroute_category="necklaces",
-        enroute_title="Cached Reference",
-        enroute_handle="cached-reference",
         image_path="/cached/02.jpg",
-            analysis_json={
-                "is_valid_wearing_reference": True,
-                "selected_model_profile": {
-                    "profile_key": "romantic_rebel_european",
-                    "name": "Romantic Rebel",
-                    "image_path": "/cached/model.jpg",
-                    "reason": "缓存模特选择",
-                },
-                "clothing_style": {"category": "缓存衣物"},
-                "shooting_style": {"shot_type": "cached crop"},
+        analysis_json={"selected_model_profile": {"profile_key": "romantic_rebel"}},
+        summary="缓存摘要",
+    )
+
+    def fake_select_enroute_analysis_from_summaries(*_args, **_kwargs):
+        return EnrouteAnalysisSelection(
+            selected_enroute_product_id="necklaces:missing",
+            reason="测试无效选择",
+        )
+
+    monkeypatch.setattr(
+        graph_module,
+        "select_enroute_analysis_from_summaries",
+        fake_select_enroute_analysis_from_summaries,
+    )
+    state = {
+        "database_path": str(database_path),
+        "enroute_reference_result": {
+            "status": "ok",
+            "category": "necklaces",
+            "learning_references": [],
+        },
+        "size_reference_result": {
+            "status": "ok",
+            "selected_images": {
+                "main_image": {"path": str(main)},
+                "size_reference_image": {"path": str(size)},
             },
-        summary="适合项链佩戴图，重点适配短链、锁骨链、中长链",
-    )
+        },
+    }
 
-    def fake_merge_remote_images_to_collage(image_urls, output_path, **_kwargs):
-        Image.new("RGB", (64, 64), "white").save(output_path)
-        from productv2.images import ImageCollageResult, NumberedImageSource
+    with pytest.raises(ValueError, match="Selected Enroute analysis"):
+        graph_module._analyze_enroute_reference(state)
 
-        source_dir = output_path.parent / "main_image_sources"
-        source_dir.mkdir(parents=True, exist_ok=True)
-        Image.new("RGB", (64, 64), "white").save(source_dir / "1.jpg")
-        return ImageCollageResult(
-            path=output_path,
-            source_images=[
-                NumberedImageSource(
-                    index=1,
-                    url=image_urls[0],
-                    path=source_dir / "1.jpg",
-                )
-            ],
+    assert "enroute_analysis_result" not in state
+
+
+def test_enroute_selection_plans_five_learning_items_when_cache_below_target(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "productv2.db"
+    enroute_dir = tmp_path / "enroute-bestsellers"
+    from productv2.db import init_database, upsert_enroute_image_analysis
+
+    init_database(database_path)
+    for index in range(8):
+        _write_enroute_reference(enroute_dir, "necklaces", f"{index:02d}-necklace")
+    for index in range(3):
+        upsert_enroute_image_analysis(
+            database_path,
+            enroute_product_id=f"necklaces:{index:02d}-necklace",
+            enroute_category="necklaces",
+            image_path=str(
+                enroute_dir / "necklaces" / f"{index:02d}-necklace" / "02.jpg"
+            ),
+            analysis_json={
+                "selected_model_profile": {"profile_key": "romantic_rebel"},
+            },
+            summary=f"缓存摘要 {index}",
         )
 
-    def fake_detect_size_reference_images(collage_path):
-        from productv2.vision import SizeReferenceDetection
+    output = graph_module._select_enroute_reference(
+        _candidate_state(database_path, enroute_dir)
+    )
+    result = output["enroute_reference_result"]
 
-        return SizeReferenceDetection(
-            can_judge_size=True,
-            image_numbers=[1],
-            size_reference_image_number=1,
-            main_image_number=1,
-            reason="有模特佩戴图",
+    assert result["status"] == "ok"
+    assert result["category"] == "necklaces"
+    assert result["cached_analysis_count"] == 3
+    assert result["learning_count"] == 5
+    assert len(result["learning_references"]) == 5
+
+
+def test_enroute_selection_plans_one_learning_item_when_cache_at_target(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "productv2.db"
+    enroute_dir = tmp_path / "enroute-bestsellers"
+    from productv2.db import init_database, upsert_enroute_image_analysis
+
+    init_database(database_path)
+    for index in range(8):
+        _write_enroute_reference(enroute_dir, "necklaces", f"{index:02d}-necklace")
+    for index in range(5):
+        upsert_enroute_image_analysis(
+            database_path,
+            enroute_product_id=f"necklaces:{index:02d}-necklace",
+            enroute_category="necklaces",
+            image_path=str(
+                enroute_dir / "necklaces" / f"{index:02d}-necklace" / "02.jpg"
+            ),
+            analysis_json={
+                "selected_model_profile": {"profile_key": "romantic_rebel"},
+            },
+            summary=f"缓存摘要 {index}",
         )
 
-    def fake_select_enroute_wearing_reference(candidate, library_dir):
-        from productv2.enroute import EnrouteReference
+    output = graph_module._select_enroute_reference(
+        _candidate_state(database_path, enroute_dir)
+    )
+    result = output["enroute_reference_result"]
 
-        reference_dir = tmp_path / "enroute" / "necklaces" / "cached-reference"
-        reference_dir.mkdir(parents=True, exist_ok=True)
-        reference_path = reference_dir / "02.jpg"
-        Image.new("RGB", (64, 64), "white").save(reference_path)
-        return EnrouteReference(
-            product_id="cached-enroute-1",
-            category="necklaces",
-            product_dir=reference_dir,
-            image_path=reference_path,
-            metadata={"title": "Cached Reference", "handle": "cached-reference"},
-        )
+    assert result["status"] == "ok"
+    assert result["cached_analysis_count"] == 5
+    assert result["learning_count"] == 1
+    assert len(result["learning_references"]) == 1
 
-    def fail_analyze_enroute_reference_image(image_path):
-        raise AssertionError("LLM should not be called when cache exists")
 
-    monkeypatch.setattr(
-        graph_module,
-        "merge_remote_images_to_numbered_collage",
-        fake_merge_remote_images_to_collage,
-    )
-    monkeypatch.setattr(
-        graph_module,
-        "detect_size_reference_images",
-        fake_detect_size_reference_images,
-    )
-    monkeypatch.setattr(
-        graph_module,
-        "select_enroute_wearing_reference",
-        fake_select_enroute_wearing_reference,
-    )
-    monkeypatch.setattr(
-        graph_module,
-        "analyze_enroute_reference_image",
-        fail_analyze_enroute_reference_image,
-    )
-
-    result = run_listing_workflow(
-        database_path=database_path,
-        product_assets_dir=assets_dir,
-        limit=1,
-    )
-
-    assert result["metrics"]["enroute_analysis_result"]["cache"] == "hit"
-    assert result["metrics"]["enroute_analysis_result"]["enroute_product_id"] == (
-        "cached-enroute-1"
-    )
-    assert result["metrics"]["enroute_analysis_result"]["analysis"][
-        "clothing_style"
-    ]["category"] == "缓存衣物"
+def test_compile_listing_graph_still_available_for_local_checks() -> None:
+    compiled = compile_listing_graph()
+    assert type(compiled).__name__ == "CompiledStateGraph"

@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from langgraph.errors import GraphInterrupt
+
 from productv2.config import DEFAULT_WORKFLOW_LOGS_DIR
 
 
@@ -36,6 +38,33 @@ class WorkflowRunLogger:
             ),
             encoding="utf-8",
         )
+
+    @classmethod
+    def from_existing_path(
+        cls,
+        path: str | Path,
+        *,
+        run_id: str | None = None,
+    ) -> "WorkflowRunLogger":
+        """Create a logger that appends to an existing workflow log file."""
+
+        logger = cls.__new__(cls)
+        logger.path = Path(path)
+        logger.run_id = run_id or logger.path.stem
+        logger.path.parent.mkdir(parents=True, exist_ok=True)
+        if not logger.path.exists():
+            logger.path.write_text(
+                "\n".join(
+                    [
+                        "工作流运行日志",
+                        f"运行编号：{logger.run_id}",
+                        "=" * 80,
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+        return logger
 
     def write(
         self,
@@ -114,6 +143,16 @@ def wrap_node_with_logging(
         )
         try:
             output = func(state)
+        except GraphInterrupt:
+            logger.write(
+                "node_interrupt",
+                node=node_name,
+                data={
+                    "summary": summarize_state(state),
+                    "decisions": extract_decisions(state),
+                },
+            )
+            raise
         except Exception as exc:
             logger.write(
                 "node_error",
@@ -167,7 +206,11 @@ def summarize_state(value: Any) -> Any:
         for key, item in value.items():
             if key == "candidates" and isinstance(item, list):
                 summary[key] = _summarize_candidates(item)
-            elif key in {"rawdata", "prompt", "analysis"}:
+            elif key == "selected_product" and isinstance(item, dict):
+                summary[key] = _candidate_summary(item)
+            elif key == "rawdata":
+                summary[key] = _summarize_rawdata(item)
+            elif key in {"prompt", "analysis"}:
                 summary[key] = _summarize_large_value(item)
             elif isinstance(item, (dict, list)):
                 summary[key] = summarize_state(item)
@@ -208,6 +251,8 @@ def _collect_decisions(value: Any, decisions: dict[str, Any], prefix: str) -> No
                 "selected_model_profile",
                 "enroute_reference_image_path",
                 "reference_image_path",
+                "input_hash",
+                "attempt_count",
             }:
                 decisions[path] = _jsonable(item)
             if isinstance(item, dict):
@@ -259,6 +304,7 @@ EVENT_LABELS = {
     "log_file_renamed": "日志文件重命名",
     "node_start": "逻辑单元开始",
     "node_end": "逻辑单元结束",
+    "node_interrupt": "逻辑单元暂停",
     "node_error": "逻辑单元异常",
     "branch_decision": "分支判断",
     "llm_request": "LLM 原始输入",
@@ -269,15 +315,21 @@ EVENT_LABELS = {
     "image_ai_request": "图片 AI 原始输入",
     "image_ai_response": "图片 AI 原始输出",
     "image_ai_error": "图片 AI 异常",
+    "ai_call_lock_acquired": "AI 调用锁获取",
+    "ai_call_lock_wait": "AI 调用锁等待",
+    "ai_call_lock_hit": "AI 调用锁命中",
+    "ai_call_lock_saved": "AI 调用锁保存",
 }
 
 NODE_DESCRIPTIONS = {
     "load_candidates": "扫描当前输入状态，从显式 JSON 或 SQLite 中加载候选商品，并选择一个有平台适配器的可处理商品。",
     "merge_main_images": "调用平台适配器获取商品主图，下载可用图片并合并为带编号的临时拼图。",
     "detect_size_reference": "调用视觉 LLM 检查编号拼图，判断是否存在人体参照，并确定尺寸参考图和产品主图编号。",
-    "select_enroute_reference": "根据当前商品类目，从本地 Enroute 参考图库中选择同类目的 02.jpg 佩戴参考图。",
-    "analyze_enroute_reference": "调用 LLM 逆向分析 Enroute 佩戴参考图，提炼模特、衣物、场景和拍摄风格，并读取或写入缓存。",
-    "generate_wearing_image": "准备佩戴图生成所需的标记主图、尺寸参考图、固定模特图和图片生成 prompt；当前不实际调用生图接口。",
+    "select_enroute_reference": "根据当前商品类目统计本地 Enroute 02.jpg 参考图和已逆向缓存，并决定本轮需要学习的同类目参考图。",
+    "analyze_enroute_reference": "按学习计划调用 LLM 逆向同类目 Enroute 佩戴图并写入缓存，然后用当前产品主图、尺寸参考图和缓存摘要选择最适合的一条逆向 JSON。",
+    "generate_wearing_image": "准备标记主图、尺寸参考图、固定模特图和图片生成 prompt，调用图片生成接口，并把生成结果保存到产品产物目录。",
+    "wait_manual_review": "暂停工作流并等待人工审核佩戴图，审核结果通过 LangGraph resume 写回流程。",
+    "mark_failed_and_reload_candidates": "根据人工审核或节点失败结果标记当前商品失败，并回到选品流程处理下一条商品。",
     "build_listing_drafts": "基于当前候选商品生成旧版上架草稿数据，当前不是主图片流程的完成标准。",
     "prepare_review_queue": "汇总运行指标、节点结果和待复核草稿，并输出最终工作流结果。",
 }
@@ -309,6 +361,10 @@ FIELD_LABELS = {
     "error_type": "异常类型",
     "error": "异常信息",
     "traceback": "异常堆栈",
+    "call_type": "调用类型",
+    "call_key": "调用锁键",
+    "owner": "锁归属",
+    "reclaimed": "是否接管过期锁",
 }
 
 
@@ -451,6 +507,10 @@ def _summarize_workflow_log_data(value: Any) -> Any:
         for key, item in value.items():
             if key == "candidates" and isinstance(item, list):
                 result[key] = _summarize_candidates(item)
+            elif key == "selected_product" and isinstance(item, dict):
+                result[key] = _candidate_summary(item)
+            elif key == "rawdata":
+                result[key] = _summarize_rawdata(item)
             elif isinstance(item, dict):
                 result[key] = _summarize_workflow_log_data(item)
             elif isinstance(item, list):
@@ -492,6 +552,15 @@ def _candidate_summary(candidate: Any) -> dict[str, Any]:
         "locked_at": candidate.get("locked_at"),
         "locked_by": candidate.get("locked_by"),
         "rawdata_keys": sorted(str(key) for key in rawdata_dict.keys()),
+    }
+
+
+def _summarize_rawdata(rawdata: Any) -> dict[str, Any]:
+    if not isinstance(rawdata, dict):
+        return {"type": type(rawdata).__name__}
+    return {
+        "rawdata_key_count": len(rawdata),
+        "rawdata_keys": sorted(str(key) for key in rawdata.keys()),
     }
 
 

@@ -1,4 +1,4 @@
-from productv2.config import Settings, build_chat_model
+from productv2.config import Settings, build_chat_model, llm_provider_fingerprint, llm_providers
 
 
 def test_build_chat_model_uses_global_responses_streaming_config() -> None:
@@ -27,3 +27,24 @@ def test_image_generation_defaults_use_ten_minute_timeouts() -> None:
 
     assert settings.image_generation_timeout == 600
     assert settings.image_generation_poll_timeout == 600
+
+
+def test_llm_providers_include_primary_and_fallbacks() -> None:
+    settings = Settings(
+        openai_api_key="sk-primary",
+        openai_api_base="https://primary.test",
+        openai_fallback_providers=(
+            '[{"name":"backup","api_base":"https://backup.test","api_key":"sk-backup"}]'
+        ),
+    )
+
+    providers = llm_providers(settings)
+
+    assert [(p.name, p.api_base, p.api_key) for p in providers] == [
+        ("primary", "https://primary.test", "sk-primary"),
+        ("backup", "https://backup.test", "sk-backup"),
+    ]
+    assert llm_provider_fingerprint(settings) == [
+        {"name": "primary", "api_base": "https://primary.test"},
+        {"name": "backup", "api_base": "https://backup.test"},
+    ]
