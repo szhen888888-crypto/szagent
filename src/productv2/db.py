@@ -702,6 +702,26 @@ def list_enroute_image_analyses_by_category(
     return [_row_to_enroute_image_analysis(row) for row in rows]
 
 
+def list_enroute_image_analyses(
+    database_path: str | Path,
+) -> list[dict[str, Any]]:
+    """Load all cached Enroute image analyses."""
+
+    init_database(database_path)
+    with connect_database(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, enroute_product_id, enroute_category, enroute_title,
+                   enroute_handle, image_path, image_position, analysis_json,
+                   summary, created_at, updated_at
+            FROM enroute_image_analyses
+            ORDER BY enroute_category, id
+            """
+        ).fetchall()
+
+    return [_row_to_enroute_image_analysis(row) for row in rows]
+
+
 def upsert_enroute_image_analysis(
     database_path: str | Path,
     *,

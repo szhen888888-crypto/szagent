@@ -42,8 +42,7 @@ uv run productv2 restart-workflow --resume-json '{"action":"approve"}'
 本地控制台用于操作 LangGraph dev 服务和 thread，不直接编辑商品数据：
 
 ```bash
-uv run productv2 control-api
-uv run productv2 control-ui
+tools/control-console.sh start
 ```
 
 默认地址：
@@ -51,6 +50,22 @@ uv run productv2 control-ui
 - 控制 API：`http://127.0.0.1:8765`
 - Web 控制台：`http://127.0.0.1:5173`
 - LangGraph API：`http://127.0.0.1:2024`
+
+控制台脚本支持统一启停：
+
+```bash
+tools/control-console.sh status
+tools/control-console.sh stop
+tools/control-console.sh restart
+tools/control-console.sh start --api-port 8766 --ui-port 5174
+```
+
+也可以分别启动：
+
+```bash
+uv run productv2 control-api
+uv run productv2 control-ui
+```
 
 控制台支持查看服务在线状态、由控制台启动/停止/重启本机 `langgraph dev`、查看 thread 列表与 state、启动 workflow、安全恢复 workflow，以及对 interrupted thread 发送 resume JSON。
 
@@ -206,7 +221,7 @@ data/products/<platform>/<product_id>/wearing_image_attempt_<n>.*
 佩戴图生成会使用固定虚拟模特 profile，定义在 `src/productv2/model_profiles.py`。当前 5 个 profile：
 
 - `Romantic Rebel`：欧洲女性，黑发/深棕发，冷淡叛逆，适合十字架、锁头、金币、蛇链。
-- `Soft Romantic`：欧洲女性，浅棕/深金发，柔和但不甜，适合珍珠、蝴蝶结、花、细链。
+- `Sharp Romantic`：欧洲女性，浅棕/深金发，冷感、警觉、有杂志感，适合珍珠、蝴蝶结、花、细链、水晶。
 - `Vintage Muse`：欧洲女性，复古脸型和旧墙/暖灰氛围，适合爱心、金币、宝石、宫廷感款。
 - `Cool Romantic`：黑人女性，松弛冷静，适合银链、珍珠、宝石、锁头、叠戴项链。
 - `Playful Muse`：亚洲女性，轻快但不网红可爱，适合海星、彩色、趣味吊坠。

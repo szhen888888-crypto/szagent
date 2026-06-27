@@ -66,25 +66,55 @@ VIRTUAL_MODEL_PROFILES: tuple[VirtualModelProfile, ...] = (
     ),
     VirtualModelProfile(
         key="soft_romantic_european",
-        name="Soft Romantic",
+        name="Sharp Romantic",
         ethnicity="European woman",
         age_feel="early 20s, young but not childish",
         face=(
-            "light-brown or dark-blonde European everyday creator; gentle but not "
-            "sweet, realistic face and natural proportions"
+            "light-brown or dark-blonde European editorial creator with strong "
+            "bone structure, clear cheekbones, a refined narrow face, focused "
+            "eyes, and realistic natural proportions; expensive but not celebrity-like"
         ),
-        skin="real skin texture, low makeup, subtle satin skin finish",
-        hair="loose light brown or dark blonde hair, soft flyaways, casual low tie",
-        temperament="soft, distant, poetic, never sugary",
-        wardrobe="sheer knit, ivory, mist blue, muted pink, fine straps, soft gray layers",
-        poses="collarbone, neck, side profile, waist-up fashion crop",
-        expression="quiet, thoughtful, not smiling for the camera",
-        best_for=("pearl", "bow", "flower", "thin chain", "heart", "soft silver"),
+        skin=(
+            "real skin texture, low makeup, controlled satin highlights, visible "
+            "eye definition, refined but not retouched"
+        ),
+        hair=(
+            "loose light brown or dark blonde hair, natural editorial waves, clean "
+            "volume, imperfect flyaways, expensive but not salon-polished"
+        ),
+        temperament=(
+            "high-end, cool, alert, editorial, self-possessed, quietly romantic, "
+            "focused and adaptable"
+        ),
+        wardrobe=(
+            "black or charcoal fitted tank, ivory mesh, sheer knit, fine straps, "
+            "tailored muted layers, pale denim"
+        ),
+        poses=(
+            "direct gaze, collarbone crop, side profile, waist-up editorial crop, "
+            "off-axis shoulders, composed posture"
+        ),
+        expression=(
+            "calm unsmiling direct gaze with quiet pressure, alert and distant, "
+            "never sleepy, blank, cute, or timid"
+        ),
+        best_for=(
+            "pearl",
+            "bow",
+            "flower",
+            "thin chain",
+            "heart",
+            "soft silver",
+            "crystal",
+            "black cord",
+        ),
         prompt=(
-            "Soft Romantic profile: a light-brown or dark-blonde European Gen Z "
-            "everyday creator, soft but not sweet, ivory sheer knit or muted blue-gray "
-            "thin-strap styling, side-profile collarbone crop, real skin texture, "
-            "quiet non-performing expression. Jewelry blends into her outfit."
+            "Sharp Romantic profile: a light-brown or dark-blonde European Gen Z "
+            "editorial creator with high-end cold romantic presence, strong bone "
+            "structure, direct alert gaze with quiet pressure, natural waves with "
+            "flyaways, black or ivory minimal thin-strap styling, collarbone crop, "
+            "real skin texture, low makeup with subtle eye definition. Jewelry "
+            "feels intentional, expensive, and personal in her outfit."
         ),
     ),
     VirtualModelProfile(

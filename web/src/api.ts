@@ -71,6 +71,54 @@ export type ThreadStateResponse = {
   progress?: ThreadProgress;
 };
 
+export type ModelProfile = {
+  profile_key: string;
+  name: string;
+  ethnicity: string;
+  age_feel: string;
+  face: string;
+  skin: string;
+  hair: string;
+  temperament: string;
+  wardrobe: string;
+  poses: string;
+  expression: string;
+  best_for: string[];
+  prompt: string;
+  negative_prompt: string;
+  summary: string;
+  image_path: string;
+  metadata_path: string;
+  image_exists: boolean;
+  image_mtime_ns: number;
+};
+
+export type ModelProfilesResponse = {
+  profiles: ModelProfile[];
+};
+
+export type EnrouteLearningItem = {
+  id: number;
+  enroute_product_id: string;
+  enroute_category: string;
+  enroute_title: string;
+  enroute_handle: string;
+  image_path: string;
+  image_position: number;
+  analysis_json: Record<string, unknown>;
+  analysis: Record<string, unknown>;
+  selected_model_profile: Record<string, unknown>;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type EnrouteLearningResponse = {
+  total: number;
+  categories: Array<{ category: string; count: number }>;
+  items: EnrouteLearningItem[];
+};
+
 const CONTROL_API_BASE =
   import.meta.env.VITE_CONTROL_API_BASE ?? "http://127.0.0.1:8765";
 
@@ -136,6 +184,14 @@ export function getThreadState(apiUrl: string, threadId: string) {
   return requestJson<ThreadStateResponse>(
     `/api/threads/${threadId}/state?api_url=${encodeURIComponent(apiUrl)}`,
   );
+}
+
+export function listModelProfiles() {
+  return requestJson<ModelProfilesResponse>("/api/model-profiles");
+}
+
+export function listEnrouteLearning() {
+  return requestJson<EnrouteLearningResponse>("/api/enroute-learning");
 }
 
 export function startWorkflow(apiUrl: string, assistantId: string) {

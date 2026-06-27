@@ -37,17 +37,24 @@ def build_model_profile_image_prompt(profile: VirtualModelProfile) -> str:
 
     return "\n".join(
         [
-            "Create a fixed virtual model reference image for future jewelry try-on generation.",
-            "Photorealistic editorial portrait, realistic everyday fashion creator, no text, no watermark.",
-            "Frame as a clean upper-body reference: lower face, neck, shoulders, collarbone, and upper torso visible.",
-            "The model should not wear any visible jewelry, so future product jewelry can be added cleanly.",
-            "Keep identity distinctive and reusable, but do not resemble any celebrity or public figure.",
-            "Use natural skin texture, low makeup, relaxed unsmiling expression, and non-commercial posing.",
-            "The image should be useful as a model identity/style reference, not a finished product ad.",
+            "Create a fixed virtual model identity reference sheet for future AI try-on generation.",
+            "The output must be a premium casting reference sheet, not a fashion editorial and not a product ad.",
+            "White or very light gray seamless background, clean high-end casting light, neutral camera, high realism.",
+            "Single same model shown as three standing views in one image: full-body front view, full-body side view, full-body back view.",
+            "The front view must show clear facial features, both eyes, nose, mouth, face shape, neck, shoulders, torso, waist, hips, legs, and body proportions.",
+            "The side and back views must match the same identity, hair, skin tone, height impression, build, and body proportions exactly.",
+            "Use minimal fitted casting clothes with high-end restraint: plain black or charcoal fitted tank top and plain black slim trousers or leggings.",
+            "No jewelry of any kind. No necklace, earrings, rings, bracelets, watches, hair accessories, logos, text, watermark, props, shadows, dramatic styling, or decorative scene.",
+            "Pose must be composed standing posture, arms relaxed naturally, not smiling, no runway pose, no crossed arms, no hand covering neck or face.",
+            "Keep the model adult and early-20s in appearance, realistic skin texture, low makeup, natural hair, clear eyes, strong eye contact, and refined facial structure.",
+            "Make the image useful for AI identity and body consistency: exact same person across all three views, sharp face, sharp body outline, plain background, premium presence.",
             "",
-            virtual_model_prompt_block(profile),
-            "",
-            "Avoid: jewelry, necklace, earrings, rings, bracelets, product display pose, plastic skin, heavy retouching, big smile, marketplace model, studio catalog lighting, text, watermark.",
+            f"Profile key: {profile.key}.",
+            f"Model type: {profile.ethnicity}, {profile.age_feel}.",
+            f"Face identity: {profile.face}.",
+            f"Skin: {profile.skin}.",
+            f"Hair: {profile.hair}.",
+            f"Temperament only for expression and posture: {profile.temperament}; keep the pose reference-sheet clean but preserve high-end presence.",
         ]
     )
 
@@ -181,6 +188,7 @@ def _write_profile_metadata(
         "image_path": str(image_path),
         "task_id": task_id,
         "source_url": source_url,
+        "prompt_type": "technical_three_view_identity_reference",
         "prompt": prompt,
         "raw": raw,
     }

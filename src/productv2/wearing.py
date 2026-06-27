@@ -13,7 +13,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 from productv2.image_generation import get_image_generator, image_file_to_data_url
 from productv2.models import CandidateProduct
+from productv2.prompt_loader import load_latest_prompt_text, render_prompt_template
 from productv2.workflow_logging import WorkflowRunLogger
+
+
+WEARING_IMAGE_PROMPT_DIR = "wearing/generate_wearing_image"
 
 
 def generate_wearing_image(
@@ -254,30 +258,24 @@ def build_wearing_image_prompt(
     summary = str(enroute_analysis_result.get("summary") or analysis.get("summary") or "")
     selected_model_profile = _selected_model_profile(enroute_analysis_result)
 
-    lines = [
-            "生成一张 inyourday 风格的首饰佩戴图。",
-            "参考图 01 标记为主图：必须将 01 中的同一件产品佩戴在模特脖子上，保持产品结构、颜色、材质、吊坠/链条关系和可识别细节一致。",
-            "参考图 02 标记为尺寸参考图：必须以 02 的真实佩戴比例为准，保持产品在脖子、锁骨和胸前区域的尺寸一致，不要放大或缩小产品。",
-            "如果提供了模特三视图参考图，必须使用该固定模特的身份、五官、肤色、体型和三维比例；三视图只用于模特一致性，不改变产品。",
-            "模特与画面风格参考以下逆向 JSON，只迁移模特选择、衣物风格、场景感觉和拍摄方式，不复制参考图中的产品。",
-            f"商品信息：product_id={candidate.product_id}, platform={candidate.platform}",
-            f"逆向摘要：{summary}",
-    ]
+    selected_model_profile_block = ""
     if selected_model_profile:
-        lines.extend(
+        selected_model_profile_block = "\n".join(
             [
                 "选定固定模特：",
                 json.dumps(selected_model_profile, ensure_ascii=False, indent=2),
-            ]
+            ],
         )
-    lines.extend(
-        [
-            "逆向 JSON：",
-            json.dumps(analysis, ensure_ascii=False, indent=2),
-            "最终画面要求：产品清晰可辨但自然融入穿搭；保证产品一致性、尺寸一致性、佩戴位置合理。",
-        ]
+    return render_prompt_template(
+        load_latest_prompt_text(WEARING_IMAGE_PROMPT_DIR),
+        {
+            "product_id": candidate.product_id,
+            "platform": candidate.platform,
+            "summary": summary,
+            "selected_model_profile_block": selected_model_profile_block,
+            "analysis_json": json.dumps(analysis, ensure_ascii=False, indent=2),
+        },
     )
-    return "\n".join(lines)
 
 
 def _selected_model_profile(enroute_analysis_result: dict[str, Any]) -> dict[str, Any]:

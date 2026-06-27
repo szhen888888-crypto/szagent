@@ -328,7 +328,7 @@ NODE_DESCRIPTIONS = {
     "select_enroute_reference": "根据当前商品类目统计本地 Enroute 02.jpg 参考图和已逆向缓存，并决定本轮需要学习的同类目参考图。",
     "analyze_enroute_reference": "按学习计划调用 LLM 逆向同类目 Enroute 佩戴图并写入缓存，然后用当前产品主图、尺寸参考图和缓存摘要选择最适合的一条逆向 JSON。",
     "generate_wearing_image": "准备标记主图、尺寸参考图、固定模特图和图片生成 prompt，调用图片生成接口，并把生成结果保存到产品产物目录。",
-    "wait_manual_review": "暂停工作流并等待人工审核佩戴图，审核结果通过 LangGraph resume 写回流程。",
+    "wait_manual_review": "构建统一人工审核 payload，并暂停工作流等待 LangGraph resume 写回审核结果；具体审核渠道由控制台服务层处理。",
     "mark_failed_and_reload_candidates": "根据人工审核或节点失败结果标记当前商品失败，并回到选品流程处理下一条商品。",
     "build_listing_drafts": "基于当前候选商品生成旧版上架草稿数据，当前不是主图片流程的完成标准。",
     "prepare_review_queue": "汇总运行指标、节点结果和待复核草稿，并输出最终工作流结果。",

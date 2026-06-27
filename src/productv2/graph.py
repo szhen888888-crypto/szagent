@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, TypedDict
@@ -13,13 +12,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from productv2.adapters import get_platform_adapter
-from productv2.config import (
-    DEFAULT_ENROUTE_BESTSELLERS_DIR,
-    DEFAULT_MODEL_PROFILES_DIR,
-    DEFAULT_PRODUCT_ASSETS_DIR,
-    DEFAULT_WORKFLOW_LOGS_DIR,
-    Settings,
-)
+from productv2.config import Settings
 from productv2.data import load_candidate_products
 from productv2.db import (
     FAILED_STATUS,
@@ -33,8 +26,12 @@ from productv2.db import (
 )
 from productv2.enroute import EnrouteReference, list_enroute_wearing_references
 from productv2.images import merge_remote_images_to_numbered_collage, product_asset_dir
+from productv2.manual_review import (
+    build_wearing_image_review_request,
+    normalize_manual_review_decision,
+)
 from productv2.models import CandidateProduct, ListingDraft
-from productv2.reference_analysis import (
+from productv2.reference_analysis_service import (
     analyze_enroute_reference_image,
     select_enroute_analysis_from_summaries,
 )
@@ -42,10 +39,25 @@ from productv2.selection import select_unfinished_product_with_adapter
 from productv2.state import initialize_product_state, set_extra
 from productv2.vision import detect_size_reference_images
 from productv2.wearing import generate_wearing_image
+from productv2.workflow_checkpoints import (
+    checkpoint_input as build_checkpoint_input,
+    get_ai_checkpoint_result,
+    merge_checkpoint_update,
+    selected_product_identity,
+    with_ai_checkpoint,
+)
 from productv2.workflow_logging import (
     WorkflowRunLogger,
     log_branch_decision,
     wrap_node_with_logging,
+)
+from productv2.workflow_paths import (
+    database_path as resolve_database_path,
+    enroute_bestsellers_dir,
+    model_profiles_dir,
+    product_assets_dir,
+    raw_data_dir,
+    workflow_logs_dir,
 )
 
 
@@ -71,6 +83,7 @@ class ListingWorkflowState(TypedDict, total=False):
     wearing_generation_attempt: int
     manual_review_request: dict[str, Any]
     manual_review_decision: dict[str, Any]
+    approved_product: dict[str, Any]
     failed_product: dict[str, Any]
     ai_checkpoints: dict[str, Any]
     metrics: dict[str, Any]
@@ -79,20 +92,21 @@ class ListingWorkflowState(TypedDict, total=False):
 MAX_WEARING_REGENERATE_ATTEMPTS = 3
 ENROUTE_CACHE_TARGET_COUNT = 5
 ENROUTE_LEARNING_CONCURRENCY = 5
+APPROVED_STATUS = "done"
 
 
 def _load_candidates(
     state: ListingWorkflowState,
     logger: WorkflowRunLogger | None = None,
 ) -> ListingWorkflowState:
-    database_path = _database_path(state)
+    db_path = resolve_database_path(state)
     raw_import_summary = import_raw_data_directory(
-        database_path=database_path,
-        raw_data_dir=_raw_data_dir(state),
+        database_path=db_path,
+        raw_data_dir=raw_data_dir(state),
     )
     sync_default_model_profiles(
-        database_path,
-        _model_profiles_dir(state),
+        db_path,
+        model_profiles_dir(state),
     )
     data_path = state.get("data_path")
     if data_path:
@@ -112,13 +126,13 @@ def _load_candidates(
         source = "json"
     else:
         selection = select_unfinished_product_with_adapter(
-            database_path=database_path,
+            database_path=db_path,
         )
         candidates = [selection.candidate] if selection.candidate else []
         if selection.candidate is not None:
             initialize_product_state(
                 selection.candidate,
-                database_path=database_path,
+                database_path=db_path,
             )
             if logger is not None:
                 logger.rename_for_product(
@@ -176,7 +190,7 @@ def _merge_main_images(state: ListingWorkflowState) -> ListingWorkflowState:
     output_path = (
         product_asset_dir(
             candidate,
-            _product_assets_dir(state),
+            product_assets_dir(state),
         )
         / "main_image_collage.jpg"
     )
@@ -218,18 +232,18 @@ def _detect_size_reference(
         }
 
     checkpoint_key = "detect_size_reference"
-    checkpoint_input = _checkpoint_input(
-        product=_selected_product_identity(state),
+    checkpoint_input = build_checkpoint_input(
+        product=selected_product_identity(state),
         collage_path=main_image_result.get("path", ""),
         source_image_count=main_image_result.get("source_image_count", 0),
         numbered_sources=main_image_result.get("numbered_sources", []),
     )
-    cached = _get_ai_checkpoint_result(state, checkpoint_key, checkpoint_input)
+    cached = get_ai_checkpoint_result(state, checkpoint_key, checkpoint_input)
     if cached is not None:
         result = dict(cached)
         result["checkpoint"] = "hit"
         set_extra("size_reference_detection", result)
-        return _with_ai_checkpoint(
+        return with_ai_checkpoint(
             state,
             {"size_reference_result": result},
             checkpoint_key=checkpoint_key,
@@ -242,7 +256,7 @@ def _detect_size_reference(
         detect_size_reference_images,
         main_image_result["path"],
         logger=logger,
-        database_path=_database_path(state),
+        database_path=resolve_database_path(state),
     )
 
     size_reference_result = {
@@ -261,7 +275,7 @@ def _detect_size_reference(
         size_reference_result["selected_images"] = selected_images
         set_extra("selected_product_images", selected_images)
     set_extra("size_reference_detection", size_reference_result)
-    return _with_ai_checkpoint(
+    return with_ai_checkpoint(
         state,
         {"size_reference_result": size_reference_result},
         checkpoint_key=checkpoint_key,
@@ -339,7 +353,7 @@ def _select_enroute_reference(state: ListingWorkflowState) -> ListingWorkflowSta
 
     category, references = list_enroute_wearing_references(
         candidates[0],
-        library_dir=_enroute_bestsellers_dir(state),
+        library_dir=enroute_bestsellers_dir(state),
     )
     if category is None or not references:
         result = {
@@ -349,7 +363,7 @@ def _select_enroute_reference(state: ListingWorkflowState) -> ListingWorkflowSta
         set_extra("enroute_reference_selection", result)
         return {"enroute_reference_result": result}
 
-    cached = _valid_enroute_analysis_cache(_database_path(state), category)
+    cached = _valid_enroute_analysis_cache(resolve_database_path(state), category)
     cached_ids = {str(row.get("enroute_product_id") or "") for row in cached}
     unlearned = [
         reference for reference in references if reference.product_id not in cached_ids
@@ -389,7 +403,7 @@ def _analyze_enroute_reference(
         set_extra("enroute_reference_analysis", result)
         return {"enroute_analysis_result": result}
 
-    database_path = _database_path(state)
+    database_path = resolve_database_path(state)
     category = str(enroute_reference_result.get("category") or "")
     if not category:
         result = {
@@ -431,7 +445,7 @@ def _analyze_enroute_reference(
             "learning_results": learning_outputs,
         }
         set_extra("enroute_reference_analysis", result)
-        return _merge_checkpoint_update(
+        return merge_checkpoint_update(
             checkpoint_state,
             {
                 "enroute_analysis_result": result,
@@ -461,18 +475,18 @@ def _analyze_enroute_reference(
             "learning_results": learning_outputs,
         }
         set_extra("enroute_reference_analysis", result)
-        return _merge_checkpoint_update(
+        return merge_checkpoint_update(
             checkpoint_state,
             {"enroute_analysis_result": result},
         )
 
     checkpoint_key = "select_enroute_analysis"
-    checkpoint_input = _checkpoint_input(
+    checkpoint_input = build_checkpoint_input(
         main_image_path=main_image_path,
         size_reference_image_path=size_reference_image_path,
         analysis_summaries=summaries,
     )
-    cached_checkpoint = _get_ai_checkpoint_result(
+    cached_checkpoint = get_ai_checkpoint_result(
         checkpoint_state,
         checkpoint_key,
         checkpoint_input,
@@ -481,7 +495,7 @@ def _analyze_enroute_reference(
         result = dict(cached_checkpoint)
         result["checkpoint"] = "hit"
         set_extra("enroute_reference_analysis", result)
-        return _with_ai_checkpoint(
+        return with_ai_checkpoint(
             checkpoint_state,
             {
                 "enroute_analysis_result": result,
@@ -545,7 +559,7 @@ def _analyze_enroute_reference(
             "selection_reason": selection.reason,
         },
     )
-    return _with_ai_checkpoint(
+    return with_ai_checkpoint(
         checkpoint_state,
         {
             "enroute_analysis_result": result,
@@ -608,7 +622,7 @@ def _learn_enroute_references(
         for future in as_completed(future_map):
             result, checkpoint_key, checkpoint_input, source = future.result()
             outputs.append(result)
-            checkpoint_state = _with_ai_checkpoint(
+            checkpoint_state = with_ai_checkpoint(
                 checkpoint_state,
                 {},
                 checkpoint_key=checkpoint_key,
@@ -628,7 +642,7 @@ def _learn_one_enroute_reference(
     logger: WorkflowRunLogger | None,
 ) -> tuple[dict[str, Any], str, dict[str, Any], str]:
     checkpoint_key = _enroute_learning_checkpoint_key(reference)
-    checkpoint_input = _checkpoint_input(
+    checkpoint_input = build_checkpoint_input(
         reference_image_path=str(reference.image_path),
         enroute_product_id=reference.product_id,
         category=reference.category,
@@ -641,7 +655,7 @@ def _learn_one_enroute_reference(
             for profile in model_profiles
         ],
     )
-    cached_checkpoint = _get_ai_checkpoint_result(
+    cached_checkpoint = get_ai_checkpoint_result(
         state,
         checkpoint_key,
         checkpoint_input,
@@ -740,7 +754,7 @@ def _enroute_learning_checkpoint_key(reference: EnrouteReference) -> str:
     return f"learn_enroute_reference_{digest}"
 
 
-def _merge_checkpoint_update(
+def merge_checkpoint_update(
     state: ListingWorkflowState,
     update: ListingWorkflowState,
 ) -> ListingWorkflowState:
@@ -763,7 +777,7 @@ def _mark_current_candidate_failed(
     if candidate.id is None:
         return {}
     failed_product = update_product_fields(
-        database_path=_database_path(state),
+        database_path=resolve_database_path(state),
         product_id=candidate.product_id,
         platform=candidate.platform,
         status=FAILED_STATUS,
@@ -775,6 +789,46 @@ def _mark_current_candidate_failed(
         "platform": failed_product.platform,
         "status": failed_product.status,
         "reason": reason,
+    }
+
+
+def _mark_current_candidate_approved(
+    state: ListingWorkflowState,
+) -> dict[str, Any]:
+    decision = state.get("manual_review_decision", {})
+    if str(decision.get("action") or "").lower() != "approve":
+        return {}
+    candidates = [
+        CandidateProduct.model_validate(candidate)
+        for candidate in state.get("candidates", [])
+    ]
+    if not candidates:
+        return {}
+    candidate = candidates[0]
+    if candidate.id is None:
+        return {}
+    wearing_image_result = state.get("wearing_image_result", {})
+    generated_image_path = (
+        str(wearing_image_result.get("generated_image_path") or "")
+        if isinstance(wearing_image_result, dict)
+        else ""
+    )
+    if not generated_image_path:
+        raise ValueError("Cannot approve product without generated wearing image path.")
+    approved_product = update_product_fields(
+        database_path=resolve_database_path(state),
+        product_id=candidate.product_id,
+        platform=candidate.platform,
+        status=APPROVED_STATUS,
+        wearing_image=generated_image_path,
+        locked_at=None,
+        locked_by=None,
+    )
+    return {
+        "product_id": approved_product.product_id,
+        "platform": approved_product.platform,
+        "status": approved_product.status,
+        "wearing_image": approved_product.wearing_image,
     }
 
 
@@ -809,19 +863,19 @@ def _generate_wearing_image(
         }
 
     checkpoint_key = f"generate_wearing_image_attempt_{next_attempt}"
-    checkpoint_input = _checkpoint_input(
-        product=_selected_product_identity(state),
+    checkpoint_input = build_checkpoint_input(
+        product=selected_product_identity(state),
         attempt=next_attempt,
         size_reference_result=state.get("size_reference_result", {}),
         enroute_analysis_result=state.get("enroute_analysis_result", {}),
         product_assets_dir=str(
             product_asset_dir(
                 candidates[0],
-                _product_assets_dir(state),
+                product_assets_dir(state),
             )
         ),
     )
-    cached = None if should_regenerate else _get_ai_checkpoint_result(
+    cached = None if should_regenerate else get_ai_checkpoint_result(
         state,
         checkpoint_key,
         checkpoint_input,
@@ -832,7 +886,7 @@ def _generate_wearing_image(
         if not generated_image_path or Path(generated_image_path).is_file():
             result["checkpoint"] = "hit"
             set_extra("wearing_image_generation", result)
-            return _with_ai_checkpoint(
+            return with_ai_checkpoint(
                 state,
                 {
                     "wearing_image_result": result,
@@ -851,14 +905,14 @@ def _generate_wearing_image(
         state.get("enroute_analysis_result", {}),
         product_asset_dir(
             candidates[0],
-            _product_assets_dir(state),
+            product_assets_dir(state),
         ),
         logger=logger,
         attempt=next_attempt,
-        database_path=_database_path(state),
+        database_path=resolve_database_path(state),
     )
     set_extra("wearing_image_generation", wearing_image_result)
-    return _with_ai_checkpoint(
+    return with_ai_checkpoint(
         state,
         {
             "wearing_image_result": wearing_image_result,
@@ -884,36 +938,17 @@ def _wait_manual_review(state: ListingWorkflowState) -> ListingWorkflowState:
             "manual_review_decision": {"action": "reject", "reason": result["reason"]},
         }
 
-    payload = {
-        "type": "wearing_image_review",
-        "product": state.get("selected_product") or (
+    payload = build_wearing_image_review_request(
+        product=state.get("selected_product") or (
             state.get("candidates", [{}])[0] if state.get("candidates") else {}
         ),
-        "generated_image_path": wearing_image_result.get("generated_image_path", ""),
-        "generated_image_url": wearing_image_result.get("generated_image_url", ""),
-        "marked_main_image_path": wearing_image_result.get("marked_main_image_path", ""),
-        "marked_size_reference_image_path": wearing_image_result.get(
-            "marked_size_reference_image_path",
-            "",
-        ),
-        "enroute_reference_image_path": wearing_image_result.get(
-            "enroute_reference_image_path",
-            "",
-        ),
-        "selected_model_profile": wearing_image_result.get(
-            "selected_model_profile",
-            {},
-        ),
-        "prompt": wearing_image_result.get("prompt", ""),
-        "attempt": state.get("wearing_generation_attempt", 1),
-        "options": ["approve", "regenerate", "reject"],
-    }
+        wearing_image_result=wearing_image_result,
+        attempt=int(state.get("wearing_generation_attempt") or 1),
+    )
     decision = interrupt(payload)
-    if not isinstance(decision, dict):
-        decision = {"action": str(decision or "reject")}
     return {
         "manual_review_request": payload,
-        "manual_review_decision": decision,
+        "manual_review_decision": normalize_manual_review_decision(decision),
     }
 
 
@@ -965,8 +1000,23 @@ def _build_listing_drafts(state: ListingWorkflowState) -> ListingWorkflowState:
         for candidate in state.get("candidates", [])
     ]
     drafts = [ListingDraft.from_candidate(candidate) for candidate in candidates]
+    approved_product = _mark_current_candidate_approved(state)
+    selected_product = dict(state.get("selected_product") or {})
+    if approved_product:
+        selected_product.update(
+            {
+                "status": approved_product["status"],
+                "wearing_image": approved_product["wearing_image"],
+                "locked_at": None,
+                "locked_by": None,
+            }
+        )
 
-    return {"drafts": [draft.model_dump() for draft in drafts]}
+    return {
+        "drafts": [draft.model_dump() for draft in drafts],
+        "selected_product": selected_product,
+        "approved_product": approved_product,
+    }
 
 
 def _prepare_review_queue(state: ListingWorkflowState) -> ListingWorkflowState:
@@ -1136,167 +1186,12 @@ def _logger_for_state(
     log_path = state.get("workflow_log_path")
     if log_path:
         return WorkflowRunLogger.from_existing_path(log_path)
-    active_logger = WorkflowRunLogger(log_dir=_workflow_logs_dir(state))
+    active_logger = WorkflowRunLogger(log_dir=workflow_logs_dir(state))
     active_logger.write(
         "workflow_start",
         data={"input_state_keys": sorted(str(key) for key in state.keys())},
     )
     return active_logger
-
-
-def _with_ai_checkpoint(
-    state: ListingWorkflowState,
-    update: ListingWorkflowState,
-    *,
-    checkpoint_key: str,
-    checkpoint_input: dict[str, Any],
-    checkpoint_result: dict[str, Any],
-    source: str,
-) -> ListingWorkflowState:
-    checkpoint = _build_ai_checkpoint(
-        checkpoint_key=checkpoint_key,
-        checkpoint_input=checkpoint_input,
-        checkpoint_result=checkpoint_result,
-        source=source,
-    )
-    checkpoints = dict(state.get("ai_checkpoints") or {})
-    existing = checkpoints.get(checkpoint_key)
-    if isinstance(existing, dict):
-        checkpoint["attempt_count"] = int(existing.get("attempt_count") or 0) + 1
-    checkpoints[checkpoint_key] = checkpoint
-    return {
-        **update,
-        "ai_checkpoints": checkpoints,
-    }
-
-
-def _build_ai_checkpoint(
-    *,
-    checkpoint_key: str,
-    checkpoint_input: dict[str, Any],
-    checkpoint_result: dict[str, Any],
-    source: str,
-) -> dict[str, Any]:
-    return {
-        "key": checkpoint_key,
-        "type": _checkpoint_type(checkpoint_key),
-        "source": source,
-        "input": _jsonable(checkpoint_input),
-        "input_hash": _stable_hash(checkpoint_input),
-        "status": str(checkpoint_result.get("status") or ""),
-        "result": _jsonable(checkpoint_result),
-        "attempt_count": 1,
-    }
-
-
-def _get_ai_checkpoint_result(
-    state: ListingWorkflowState,
-    checkpoint_key: str,
-    checkpoint_input: dict[str, Any],
-) -> dict[str, Any] | None:
-    checkpoints = state.get("ai_checkpoints")
-    if not isinstance(checkpoints, dict):
-        return None
-    checkpoint = checkpoints.get(checkpoint_key)
-    if not isinstance(checkpoint, dict):
-        return None
-    if checkpoint.get("input_hash") != _stable_hash(checkpoint_input):
-        return None
-    if checkpoint.get("status") in {"failed", "error"}:
-        return None
-    result = checkpoint.get("result")
-    if isinstance(result, dict) and result.get("status") in {"failed", "error"}:
-        return None
-    return dict(result) if isinstance(result, dict) else None
-
-
-def _checkpoint_input(**items: Any) -> dict[str, Any]:
-    return _jsonable(items)
-
-
-def _checkpoint_type(checkpoint_key: str) -> str:
-    if checkpoint_key.startswith("generate_wearing_image"):
-        return "image_ai"
-    return "llm"
-
-
-def _selected_product_identity(state: ListingWorkflowState) -> dict[str, Any]:
-    product = state.get("selected_product") or (
-        state.get("candidates", [{}])[0] if state.get("candidates") else {}
-    )
-    if not isinstance(product, dict):
-        return {}
-    return {
-        "id": product.get("id"),
-        "product_id": product.get("product_id"),
-        "platform": product.get("platform"),
-        "status": product.get("status"),
-    }
-
-
-def _stable_hash(value: Any) -> str:
-    raw = json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, tuple):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, set):
-        return sorted(_jsonable(item) for item in value)
-    if hasattr(value, "model_dump"):
-        return _jsonable(value.model_dump())
-    try:
-        json.dumps(value)
-    except TypeError:
-        return str(value)
-    return value
-
-
-def _database_path(state: ListingWorkflowState) -> Path:
-    return Path(state.get("database_path") or Settings().productv2_database_path)
-
-
-def _raw_data_dir(state: ListingWorkflowState) -> Path:
-    return Path(state.get("raw_data_dir") or Settings().productv2_raw_data_dir)
-
-
-def _product_assets_dir(state: ListingWorkflowState) -> Path:
-    return Path(
-        state.get("product_assets_dir")
-        or Settings().productv2_product_assets_dir
-        or DEFAULT_PRODUCT_ASSETS_DIR
-    )
-
-
-def _enroute_bestsellers_dir(state: ListingWorkflowState) -> Path:
-    return Path(
-        state.get("enroute_bestsellers_dir")
-        or Settings().productv2_enroute_bestsellers_dir
-        or DEFAULT_ENROUTE_BESTSELLERS_DIR
-    )
-
-
-def _model_profiles_dir(state: ListingWorkflowState) -> Path:
-    return Path(
-        state.get("model_profiles_dir")
-        or Settings().productv2_model_profiles_dir
-        or DEFAULT_MODEL_PROFILES_DIR
-    )
-
-
-def _workflow_logs_dir(state: ListingWorkflowState) -> Path:
-    return Path(
-        state.get("workflow_logs_dir")
-        or Settings().productv2_workflow_logs_dir
-        or DEFAULT_WORKFLOW_LOGS_DIR
-    )
 
 
 def _call_with_optional_logger(func, *args, logger: WorkflowRunLogger | None = None, **kwargs):

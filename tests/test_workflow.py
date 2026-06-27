@@ -6,12 +6,13 @@ import json
 from PIL import Image
 
 import productv2.graph as graph_module
+import productv2.workflow_checkpoints as checkpoints_module
 from productv2.dev_graph import product_listing
 from productv2.graph import MAX_WEARING_REGENERATE_ATTEMPTS
 from productv2.graph import _route_manual_review_decision
 from productv2.graph import build_listing_graph
 from productv2.graph import compile_listing_graph
-from productv2.reference_analysis import EnrouteAnalysisSelection
+from productv2.reference_analysis_service import EnrouteAnalysisSelection
 from productv2.vision import SizeReferenceDetection
 from productv2.wearing import save_generated_wearing_image
 
@@ -145,6 +146,144 @@ def test_mark_failed_and_reload_candidates_updates_database(tmp_path) -> None:
             ("p-1", "1688"),
         ).fetchone()
     assert row == ("failed", None, None)
+
+
+def test_build_listing_drafts_approve_persists_wearing_image_and_unlocks(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "productv2.db"
+    wearing_image = tmp_path / "wearing_image_attempt_1.png"
+    wearing_image.write_text("fake image", encoding="utf-8")
+    from productv2.db import init_database
+
+    init_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO products (
+                product_id, platform, rawdata, status, locked_at, locked_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "p-1",
+                "1688",
+                json.dumps({"title": "Layered necklace"}),
+                "processing",
+                "2026-01-01T00:00:00",
+                "worker",
+            ),
+        )
+
+    output = graph_module._build_listing_drafts(
+        {
+            "database_path": str(database_path),
+            "candidates": [
+                {
+                    "id": 1,
+                    "product_id": "p-1",
+                    "platform": "1688",
+                    "rawdata": {"title": "Layered necklace"},
+                    "status": "processing",
+                    "main_image": "",
+                    "wearing_image": "",
+                    "detail_image": "",
+                    "size_ratio_image": "",
+                    "multi_angle_image": "",
+                    "locked_at": "2026-01-01T00:00:00",
+                    "locked_by": "worker",
+                    "created_at": "",
+                    "updated_at": "",
+                }
+            ],
+            "selected_product": {
+                "product_id": "p-1",
+                "platform": "1688",
+                "status": "processing",
+                "wearing_image": "",
+            },
+            "wearing_image_result": {
+                "status": "ok",
+                "generated_image_path": str(wearing_image),
+            },
+            "manual_review_decision": {"action": "approve"},
+        }
+    )
+
+    assert output["approved_product"] == {
+        "product_id": "p-1",
+        "platform": "1688",
+        "status": "done",
+        "wearing_image": str(wearing_image),
+    }
+    assert output["selected_product"]["status"] == "done"
+    assert output["selected_product"]["wearing_image"] == str(wearing_image)
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT status, wearing_image, locked_at, locked_by
+            FROM products
+            WHERE product_id = ? AND platform = ?
+            """,
+            ("p-1", "1688"),
+        ).fetchone()
+    assert row == ("done", str(wearing_image), None, None)
+
+
+def test_build_listing_drafts_without_approve_does_not_finalize_product(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "productv2.db"
+    from productv2.db import init_database
+
+    init_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO products (
+                product_id, platform, rawdata, status, locked_at, locked_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("p-1", "1688", "{}", "processing", "2026-01-01T00:00:00", "worker"),
+        )
+
+    output = graph_module._build_listing_drafts(
+        {
+            "database_path": str(database_path),
+            "candidates": [
+                {
+                    "id": 1,
+                    "product_id": "p-1",
+                    "platform": "1688",
+                    "rawdata": {},
+                    "status": "processing",
+                    "main_image": "",
+                    "wearing_image": "",
+                    "detail_image": "",
+                    "size_ratio_image": "",
+                    "multi_angle_image": "",
+                    "locked_at": "2026-01-01T00:00:00",
+                    "locked_by": "worker",
+                    "created_at": "",
+                    "updated_at": "",
+                }
+            ],
+            "manual_review_decision": {},
+        }
+    )
+
+    assert output["approved_product"] == {}
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT status, wearing_image, locked_at, locked_by
+            FROM products
+            WHERE product_id = ? AND platform = ?
+            """,
+            ("p-1", "1688"),
+        ).fetchone()
+    assert row == ("processing", "", "2026-01-01T00:00:00", "worker")
 
 
 def test_mark_failed_and_reload_candidates_propagates_database_errors(
@@ -334,14 +473,14 @@ def test_failed_size_reference_checkpoint_is_not_reused(monkeypatch, tmp_path) -
             "numbered_sources": [{"index": 1, "path": str(collage), "url": ""}],
         },
     }
-    checkpoint_input = graph_module._checkpoint_input(
-        product=graph_module._selected_product_identity(state),
+    checkpoint_input = checkpoints_module.checkpoint_input(
+        product=checkpoints_module.selected_product_identity(state),
         collage_path=str(collage),
         source_image_count=1,
         numbered_sources=[{"index": 1, "path": str(collage), "url": ""}],
     )
     state["ai_checkpoints"] = {
-        "detect_size_reference": graph_module._build_ai_checkpoint(
+        "detect_size_reference": checkpoints_module.build_ai_checkpoint(
             checkpoint_key="detect_size_reference",
             checkpoint_input=checkpoint_input,
             checkpoint_result={"status": "failed", "reason": "HTTP 503"},

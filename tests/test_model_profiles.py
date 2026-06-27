@@ -32,6 +32,18 @@ def test_get_virtual_model_profile_returns_named_profile() -> None:
     assert "cross" in profile.best_for
 
 
+def test_soft_romantic_slot_is_replaced_with_sharper_profile() -> None:
+    profile = get_virtual_model_profile("soft_romantic_european")
+
+    assert profile.name == "Sharp Romantic"
+    assert "high-end" in profile.temperament
+    assert "alert" in profile.expression
+    assert "direct gaze" in profile.poses
+    assert "sleepy" in profile.expression
+    assert "quiet pressure" in profile.expression
+    assert "soft" not in profile.temperament.lower()
+
+
 def test_virtual_model_profile_summary_is_compact_for_database() -> None:
     profile = get_virtual_model_profile("romantic_rebel_european")
     summary = virtual_model_profile_summary(profile)

@@ -69,8 +69,19 @@ class Settings(BaseSettings):
     ai_call_lock_wait_timeout: float = 900.0
     ai_call_lock_poll_interval: float = 2.0
     ai_call_lock_stale_after: float = 3600.0
+    feishu_api_base: str = "https://open.feishu.cn"
     feishu_app_id: str = ""
     feishu_app_secret: SecretStr | None = None
+    feishu_receive_id: str = ""
+    feishu_receive_id_type: str = "open_id"
+    feishu_review_url: str = ""
+    feishu_verification_token: SecretStr | None = None
+    feishu_long_connection_enabled: bool = True
+    review_watcher_enabled: bool = True
+    review_watcher_interval: float = 5.0
+    review_watcher_api_url: str = "http://127.0.0.1:2024"
+    review_watcher_assistant_id: str = "product_listing"
+    review_watcher_thread_limit: int = 50
 
     model_config = SettingsConfigDict(
         env_file=".env",

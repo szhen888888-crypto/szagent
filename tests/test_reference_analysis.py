@@ -1,11 +1,24 @@
 from productv2.config import Settings
-from productv2.reference_analysis import (
+import productv2.reference_analysis as compatibility_module
+import productv2.reference_analysis_service as service_module
+from productv2.reference_analysis_service import (
     build_enroute_analysis_selection_payload,
     build_enroute_reference_analysis_payload,
     format_model_profile_options,
     parse_enroute_analysis_selection,
     parse_enroute_reference_analysis,
 )
+
+
+def test_reference_analysis_module_reexports_service_layer() -> None:
+    assert (
+        compatibility_module.analyze_enroute_reference_image
+        is service_module.analyze_enroute_reference_image
+    )
+    assert (
+        compatibility_module.build_enroute_reference_analysis_payload
+        is service_module.build_enroute_reference_analysis_payload
+    )
 
 
 def test_parse_enroute_reference_analysis_cleans_instruction_lists() -> None:
