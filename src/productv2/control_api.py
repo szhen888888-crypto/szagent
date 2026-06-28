@@ -28,9 +28,11 @@ from productv2.cli import (
 )
 from productv2.config import PROJECT_ROOT
 from productv2.config import Settings
+from productv2.db import RAW_IMPORT_STATUS
 from productv2.db import clear_enroute_image_analyses
 from productv2.db import get_product_by_identity
 from productv2.db import list_enroute_image_analyses
+from productv2.db import update_product_fields
 from productv2.feishu_long_connection import FeishuLongConnectionServer
 from productv2.feishu_long_connection import list_feishu_event_log
 from productv2.manual_review import manual_review_payload_from_state
@@ -103,6 +105,13 @@ class WorkflowRestartRequest(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
     resume: Any | None = None
     thread_limit: int = 20
+
+
+class ClearFlowsRequest(BaseModel):
+    api_url: str = DEFAULT_LANGGRAPH_API_URL
+    assistant_id: str = DEFAULT_ASSISTANT_ID
+    thread_limit: int = Field(default=100, ge=1, le=100)
+    reset_status: str = RAW_IMPORT_STATUS
 
 
 class ResumeThreadRequest(BaseModel):
@@ -428,6 +437,19 @@ def restart_workflow(payload: WorkflowRestartRequest) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.post("/api/workflows/clear-flows")
+def clear_workflow_flows(payload: ClearFlowsRequest) -> dict[str, Any]:
+    try:
+        return _clear_workflow_flows(
+            api_url=payload.api_url,
+            assistant_id=payload.assistant_id,
+            thread_limit=payload.thread_limit,
+            reset_status=payload.reset_status,
+        )
+    except SystemExit as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/api/threads/{thread_id}/resume")
 def resume_thread(thread_id: str, payload: ResumeThreadRequest) -> dict[str, Any]:
     if payload.resume is None:
@@ -492,6 +514,186 @@ def _resume_thread(
         "resume_payload": resume_payload,
         "multitask_strategy": "reject",
     }
+
+
+def _clear_workflow_flows(
+    *,
+    api_url: str,
+    assistant_id: str,
+    thread_limit: int,
+    reset_status: str = RAW_IMPORT_STATUS,
+) -> dict[str, Any]:
+    base_url = api_url.rstrip("/")
+    result = list_workflow_threads_via_api(
+        api_url=base_url,
+        assistant_id=assistant_id,
+        thread_limit=thread_limit,
+    )
+    if result.get("online") is False:
+        return {
+            "mode": "clear_flows",
+            "api_url": base_url,
+            "assistant_id": assistant_id,
+            "online": False,
+            "error": result.get("error", ""),
+            "deleted_threads": 0,
+            "products_reset": 0,
+            "skipped_products": 0,
+            "items": [],
+            "message": "LangGraph API 不在线，未清理 flow。",
+        }
+
+    settings = Settings()
+    items: list[dict[str, Any]] = []
+    seen_products: set[tuple[str, str]] = set()
+    threads = [
+        thread for thread in result.get("threads", []) if isinstance(thread, dict)
+    ]
+    for thread in threads:
+        thread_id = str(thread.get("thread_id") or "")
+        if not thread_id:
+            continue
+        item: dict[str, Any] = {"thread_id": thread_id}
+        state: Any = {}
+        try:
+            state = _api_get_json(base_url, f"/threads/{thread_id}/state")
+            item["state_loaded"] = True
+        except SystemExit as exc:
+            item["state_loaded"] = False
+            item["state_error"] = str(exc)
+
+        identity = _product_identity_from_thread_state_or_summary(state, thread)
+        if identity:
+            product_id, platform = identity
+            item["product_id"] = product_id
+            item["platform"] = platform
+
+        try:
+            _api_delete_json(base_url, f"/threads/{thread_id}")
+            item["deleted"] = True
+        except SystemExit as exc:
+            item["deleted"] = False
+            item["delete_error"] = str(exc)
+            items.append(item)
+            continue
+
+        if not identity:
+            item["database_reset"] = False
+            item["database_skip_reason"] = "missing_product_identity"
+            items.append(item)
+            continue
+
+        if identity in seen_products:
+            item["database_reset"] = False
+            item["database_skip_reason"] = "duplicate_product_identity"
+            items.append(item)
+            continue
+
+        seen_products.add(identity)
+        try:
+            product = update_product_fields(
+                settings.productv2_database_path,
+                identity[0],
+                identity[1],
+                status=reset_status,
+                locked_at=None,
+                locked_by=None,
+            )
+            item["database_reset"] = True
+            item["database_product"] = {
+                "product_id": product.product_id,
+                "platform": product.platform,
+                "status": product.status,
+                "locked_at": product.locked_at,
+                "locked_by": product.locked_by,
+            }
+        except Exception as exc:
+            item["database_reset"] = False
+            item["database_error"] = f"{type(exc).__name__}: {exc}"
+        items.append(item)
+
+    deleted_count = sum(1 for item in items if item.get("deleted") is True)
+    products_reset = sum(1 for item in items if item.get("database_reset") is True)
+    skipped_products = sum(
+        1
+        for item in items
+        if item.get("deleted") is True and item.get("database_reset") is not True
+    )
+    return {
+        "mode": "clear_flows",
+        "api_url": base_url,
+        "assistant_id": assistant_id,
+        "online": True,
+        "thread_count": len(threads),
+        "deleted_threads": deleted_count,
+        "products_reset": products_reset,
+        "skipped_products": skipped_products,
+        "items": items,
+        "message": (
+            f"已清理 {deleted_count} 个 flow，并恢复 {products_reset} 个商品为"
+            f" {reset_status}。"
+        ),
+    }
+
+
+def _api_delete_json(base_url: str, path: str) -> Any:
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.delete(f"{base_url}{path}")
+            response.raise_for_status()
+            if response.content:
+                return response.json()
+            return {}
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text
+        raise SystemExit(
+            f"LangGraph API 请求失败：HTTP {exc.response.status_code} {detail}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise SystemExit(f"无法连接 LangGraph API：{base_url}，{exc}") from exc
+
+
+def _product_identity_from_thread_state_or_summary(
+    state: Any,
+    thread: dict[str, Any],
+) -> tuple[str, str] | None:
+    for product in _candidate_products_from_state(state):
+        identity = _product_identity_from_mapping(product)
+        if identity:
+            return identity
+    summary = thread.get("summary")
+    if isinstance(summary, dict):
+        identity = _product_identity_from_mapping(summary)
+        if identity:
+            return identity
+    return None
+
+
+def _candidate_products_from_state(state: Any) -> list[dict[str, Any]]:
+    if not isinstance(state, dict):
+        return []
+    values = state.get("values")
+    if not isinstance(values, dict):
+        return []
+    candidates: list[dict[str, Any]] = []
+    selected = values.get("selected_product")
+    if isinstance(selected, dict):
+        candidates.append(selected)
+    failed = values.get("failed_product")
+    if isinstance(failed, dict):
+        product = failed.get("product")
+        if isinstance(product, dict):
+            candidates.append(product)
+        candidates.append(failed)
+    return candidates
+
+
+def _product_identity_from_mapping(value: dict[str, Any]) -> tuple[str, str] | None:
+    product_id = str(value.get("product_id") or "").strip()
+    platform = str(value.get("platform") or "").strip()
+    if product_id and platform:
+        return product_id, platform
+    return None
 
 
 def _start_feishu_long_connection(settings: Settings | None = None) -> dict[str, Any]:

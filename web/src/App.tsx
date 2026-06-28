@@ -20,9 +20,12 @@ import {
   RefreshCcw,
   RotateCcw,
   Square,
+  Trash2,
 } from "lucide-react";
+import Zoom from "react-medium-image-zoom";
 import {
   clearEnrouteLearning,
+  clearWorkflowFlows,
   getServerStatus,
   getThreadState,
   listEnrouteLearning,
@@ -67,6 +70,7 @@ type ActionKey =
   | "server-restart"
   | "workflow-start"
   | "workflow-restart"
+  | "clear-flows"
   | "clear-enroute"
   | "resume-approve"
   | "resume-regenerate"
@@ -104,7 +108,9 @@ export default function App() {
     selectedThreadIdRef.current = selectedThreadId;
   }, [selectedThreadId]);
 
-  async function refreshAll(options: { silent?: boolean } = {}) {
+  async function refreshAll(
+    options: { silent?: boolean; autoSelectThread?: boolean } = {},
+  ) {
     if (!options.silent) {
       setLoading(true);
       setError("");
@@ -116,7 +122,11 @@ export default function App() {
       ]);
       setStableJsonState(setServer, serverStatus);
       setStableJsonState(setThreads, threadList);
-      if (!selectedThreadIdRef.current && threadList.threads.length > 0) {
+      if (
+        options.autoSelectThread !== false &&
+        !selectedThreadIdRef.current &&
+        threadList.threads.length > 0
+      ) {
         setSelectedThreadId(threadList.threads[0].thread_id);
       }
     } catch (err) {
@@ -220,7 +230,7 @@ export default function App() {
   async function runAction(
     action: () => Promise<Record<string, unknown>>,
     actionKey: ActionKey,
-    options: { refreshTasks?: boolean } = {},
+    options: { refreshTasks?: boolean; clearThreadSelection?: boolean } = {},
   ) {
     setActiveAction(actionKey);
     setLoading(true);
@@ -236,11 +246,20 @@ export default function App() {
       if (shouldSelectResultThread && typeof result.thread_id === "string") {
         setSelectedThreadId(result.thread_id);
       }
+      if (options.clearThreadSelection) {
+        selectedThreadIdRef.current = "";
+        setSelectedThreadId("");
+        setThreadState(null);
+      }
       if (options.refreshTasks ?? true) {
-        await refreshAll();
-        await refreshThreadState(
-          shouldSelectResultThread ? resultThreadId : selectedThreadId,
-        );
+        await refreshAll({
+          autoSelectThread: options.clearThreadSelection ? false : undefined,
+        });
+        if (!options.clearThreadSelection) {
+          await refreshThreadState(
+            shouldSelectResultThread ? resultThreadId : selectedThreadId,
+          );
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -362,6 +381,13 @@ export default function App() {
                   runAction(
                     () => restartWorkflow(apiUrl, assistantId, selectedThreadId),
                     "workflow-restart",
+                  )
+                }
+                onClearFlows={() =>
+                  runAction(
+                    () => clearWorkflowFlows(apiUrl, assistantId),
+                    "clear-flows",
+                    { clearThreadSelection: true },
                   )
                 }
               />
@@ -540,18 +566,20 @@ function WorkflowPanel({
   activeAction,
   onStart,
   onRestart,
+  onClearFlows,
 }: {
   loading: boolean;
   activeAction: ActionKey | null;
   onStart: () => void;
   onRestart: () => void;
+  onClearFlows: () => void;
 }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle>Workflow</CardTitle>
       </CardHeader>
-      <CardContent className="grid grid-cols-2 gap-2">
+      <CardContent className="grid gap-2 sm:grid-cols-3">
         <Button
           onClick={onStart}
           disabled={loading}
@@ -570,6 +598,16 @@ function WorkflowPanel({
         >
           <RefreshCcw className="h-4 w-4" />
           安全恢复
+        </Button>
+        <Button
+          onClick={onClearFlows}
+          disabled={loading}
+          loading={activeAction === "clear-flows"}
+          loadingText="清理中"
+          variant="destructive"
+        >
+          <Trash2 className="h-4 w-4" />
+          清理 Flow
         </Button>
       </CardContent>
     </Card>
@@ -639,6 +677,22 @@ function ThreadList({
 }
 
 function ModelProfilesPage({ profiles }: { profiles: ModelProfile[] }) {
+  const [selectedKey, setSelectedKey] = useState("");
+  const selectedProfile =
+    profiles.find((profile) => profile.profile_key === selectedKey) ?? profiles[0];
+
+  useEffect(() => {
+    if (profiles.length === 0) {
+      if (selectedKey) {
+        setSelectedKey("");
+      }
+      return;
+    }
+    if (!profiles.some((profile) => profile.profile_key === selectedKey)) {
+      setSelectedKey(profiles[0].profile_key);
+    }
+  }, [profiles, selectedKey]);
+
   return (
     <section className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -658,10 +712,65 @@ function ModelProfilesPage({ profiles }: { profiles: ModelProfile[] }) {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-4 xl:grid-cols-2">
-          {profiles.map((profile) => (
-            <ModelProfileCard key={profile.profile_key} profile={profile} />
-          ))}
+        <div className="grid gap-4 lg:grid-cols-[300px_1fr]">
+          <Card className="self-start overflow-hidden">
+            <CardHeader className="border-b border-zinc-200 bg-zinc-50/70">
+              <CardTitle>模特列表</CardTitle>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div
+                className="flex gap-2 overflow-x-auto p-2 lg:flex-col lg:overflow-visible"
+                role="tablist"
+                aria-label="固定模特"
+              >
+                {profiles.map((profile) => {
+                  const active = profile.profile_key === selectedProfile?.profile_key;
+                  return (
+                    <button
+                      key={profile.profile_key}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setSelectedKey(profile.profile_key)}
+                      className={`min-w-[220px] rounded-md border p-3 text-left shadow-sm transition-all duration-150 lg:min-w-0 ${
+                        active
+                          ? "border-zinc-950 bg-zinc-950 text-white"
+                          : "border-zinc-200 bg-white text-zinc-950 hover:-translate-y-px hover:bg-zinc-50"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium">
+                            {profile.name}
+                          </p>
+                          <p
+                            className={`mt-1 truncate font-mono text-xs ${
+                              active ? "text-zinc-300" : "text-zinc-500"
+                            }`}
+                          >
+                            {profile.profile_key}
+                          </p>
+                        </div>
+                        <span
+                          className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
+                            profile.image_exists ? "bg-emerald-500" : "bg-amber-400"
+                          }`}
+                        />
+                      </div>
+                      <p
+                        className={`mt-2 line-clamp-2 text-xs ${
+                          active ? "text-zinc-200" : "text-zinc-500"
+                        }`}
+                      >
+                        {profile.temperament || profile.ethnicity}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+          {selectedProfile ? <ModelProfileCard profile={selectedProfile} /> : null}
         </div>
       )}
     </section>
@@ -670,8 +779,8 @@ function ModelProfilesPage({ profiles }: { profiles: ModelProfile[] }) {
 
 function ModelProfileCard({ profile }: { profile: ModelProfile }) {
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-start justify-between gap-3">
+    <Card className="overflow-hidden">
+      <CardHeader className="flex flex-row items-start justify-between gap-3 border-b border-zinc-200 bg-zinc-50/70">
         <div className="min-w-0">
           <CardTitle>{profile.name}</CardTitle>
           <p className="mt-1 break-all font-mono text-xs text-zinc-500">
@@ -682,13 +791,14 @@ function ModelProfileCard({ profile }: { profile: ModelProfile }) {
           {profile.image_exists ? "有图片" : "缺图片"}
         </Badge>
       </CardHeader>
-      <CardContent className="grid gap-4 md:grid-cols-[260px_1fr]">
-        <div className="min-w-0">
+      <CardContent className="grid gap-0 p-0 lg:grid-cols-[320px_1fr]">
+        <div className="min-w-0 border-b border-zinc-200 p-4 lg:border-b-0 lg:border-r">
           {profile.image_path ? (
-            <img
-              className="aspect-[2/3] w-full rounded-md border border-zinc-200 bg-zinc-50 object-cover"
+            <ZoomableImage
+              className="aspect-[2/3] w-full rounded-md border border-zinc-200 bg-white object-cover"
               src={imageDisplayUrl(profile.image_path, profile.image_mtime_ns)}
               alt={profile.name}
+              loading="lazy"
             />
           ) : (
             <div className="flex aspect-[2/3] w-full items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-sm text-zinc-500">
@@ -701,10 +811,17 @@ function ModelProfileCard({ profile }: { profile: ModelProfile }) {
           </p>
         </div>
 
-        <div className="min-w-0 space-y-3">
-          <div className="grid gap-3 md:grid-cols-2">
+        <div className="min-w-0 space-y-4 p-4">
+          <div className="grid gap-3 md:grid-cols-3">
             <InfoBlock label="身份" value={profile.ethnicity} />
             <InfoBlock label="年龄感" value={profile.age_feel} />
+            <InfoBlock label="图片状态" value={profile.image_exists ? "已就绪" : "缺图片"} />
+          </div>
+          <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
+            <p className="text-sm font-medium">模特摘要</p>
+            <p className="mt-2 break-words text-sm leading-relaxed text-zinc-700">
+              {profile.summary}
+            </p>
           </div>
           <KeyValuePanel
             title="关键风格"
@@ -1940,7 +2057,7 @@ function ImagePreview({
         ) : null}
       </div>
       {url ? (
-        <img
+        <ZoomableImage
           className={`w-full bg-white object-contain ${large ? "max-h-[560px]" : "h-56"}`}
           src={url}
           alt={label}
@@ -1953,6 +2070,29 @@ function ImagePreview({
         {path || "-"}
       </p>
     </div>
+  );
+}
+
+function ZoomableImage({
+  className,
+  src,
+  alt,
+  loading,
+}: {
+  className: string;
+  src: string;
+  alt: string;
+  loading?: "eager" | "lazy";
+}) {
+  return (
+    <Zoom>
+      <img
+        className={`${className} cursor-zoom-in`}
+        src={src}
+        alt={alt}
+        loading={loading}
+      />
+    </Zoom>
   );
 }
 
@@ -2203,6 +2343,13 @@ function actionNotice(result: Record<string, unknown>) {
   if (result.mode === "started") {
     return "已启动新 workflow。";
   }
+  if (result.mode === "clear_flows") {
+    const deletedThreads =
+      typeof result.deleted_threads === "number" ? result.deleted_threads : 0;
+    const productsReset =
+      typeof result.products_reset === "number" ? result.products_reset : 0;
+    return `已清理 ${deletedThreads} 个 flow，同步恢复 ${productsReset} 个商品。`;
+  }
   return "";
 }
 
@@ -2408,6 +2555,7 @@ function OperationResult({ result }: { result: Record<string, unknown> | null })
   const skippedThreads = Array.isArray(result.skipped_threads)
     ? result.skipped_threads
     : [];
+  const isClearFlows = result.mode === "clear_flows";
 
   return (
     <div className="space-y-3">
@@ -2420,6 +2568,14 @@ function OperationResult({ result }: { result: Record<string, unknown> | null })
       {typeof result.message === "string" && result.message ? (
         <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
           {result.message}
+        </div>
+      ) : null}
+
+      {isClearFlows ? (
+        <div className="grid gap-3 md:grid-cols-3">
+          <InfoBlock label="清理 Flow" value={result.deleted_threads} />
+          <InfoBlock label="恢复商品" value={result.products_reset} />
+          <InfoBlock label="跳过商品" value={result.skipped_products} />
         </div>
       ) : null}
 
@@ -2525,16 +2681,14 @@ function ImageValuePreview({
   const url = imageDisplayUrl(path);
   return (
     <div className="min-w-0 space-y-2">
-      <a href={url} target="_blank" rel="noreferrer" className="block">
-        <img
-          className={`w-full rounded-md border border-zinc-200 bg-white object-contain ${
-            compact ? "max-h-40" : "max-h-72"
-          }`}
-          src={url}
-          alt={label}
-          loading="lazy"
-        />
-      </a>
+      <ZoomableImage
+        className={`w-full rounded-md border border-zinc-200 bg-white object-contain ${
+          compact ? "max-h-40" : "max-h-72"
+        }`}
+        src={url}
+        alt={label}
+        loading="lazy"
+      />
       <p className="select-text break-all font-mono text-xs font-normal text-zinc-500">
         {path}
       </p>
@@ -2726,6 +2880,7 @@ function operationModeLabel(mode: unknown) {
     resumed: "已提交恢复",
     started_after_no_unfinished_thread: "已启动新任务",
     started: "已启动",
+    clear_flows: "已清理 Flow",
   };
   return typeof mode === "string" ? labels[mode] ?? mode : "-";
 }

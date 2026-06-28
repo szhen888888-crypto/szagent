@@ -347,6 +347,107 @@ def test_control_api_restarts_workflow(monkeypatch) -> None:
     assert response.json()["mode"] == "resume_required"
 
 
+def test_control_api_clears_workflow_flows_and_resets_products(monkeypatch) -> None:
+    def fake_list_workflow_threads_via_api(**kwargs):
+        return {
+            "online": True,
+            "api_url": kwargs["api_url"],
+            "assistant_id": kwargs["assistant_id"],
+            "threads": [
+                {
+                    "thread_id": "thread-1",
+                    "status": "interrupted",
+                    "summary": {"product_id": "summary-p1", "platform": "1688"},
+                },
+                {
+                    "thread_id": "thread-2",
+                    "status": "idle",
+                    "summary": {"product_id": "summary-p2", "platform": "1688"},
+                },
+            ],
+        }
+
+    states = {
+        "/threads/thread-1/state": {
+            "values": {
+                "selected_product": {
+                    "product_id": "state-p1",
+                    "platform": "1688",
+                    "status": "processing",
+                }
+            }
+        },
+        "/threads/thread-2/state": {"values": {}},
+    }
+    deleted_paths = []
+    product_updates = []
+
+    def fake_update_product_fields(_database_path, product_id, platform, **fields):
+        product_updates.append((product_id, platform, fields))
+        return type(
+            "ProductStub",
+            (),
+            {
+                "product_id": product_id,
+                "platform": platform,
+                "status": fields["status"],
+                "locked_at": fields["locked_at"],
+                "locked_by": fields["locked_by"],
+            },
+        )()
+
+    monkeypatch.setattr(
+        control_api,
+        "list_workflow_threads_via_api",
+        fake_list_workflow_threads_via_api,
+    )
+    monkeypatch.setattr(
+        control_api,
+        "_api_get_json",
+        lambda _base_url, path: states[path],
+    )
+    monkeypatch.setattr(
+        control_api,
+        "_api_delete_json",
+        lambda _base_url, path: deleted_paths.append(path) or {},
+    )
+    monkeypatch.setattr(
+        control_api,
+        "update_product_fields",
+        fake_update_product_fields,
+    )
+    monkeypatch.setattr(
+        control_api,
+        "Settings",
+        lambda: type("SettingsStub", (), {"productv2_database_path": "test.db"})(),
+    )
+
+    client = TestClient(control_api.app)
+    response = client.post(
+        "/api/workflows/clear-flows",
+        json={"api_url": "http://testserver", "assistant_id": "graph"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "clear_flows"
+    assert payload["deleted_threads"] == 2
+    assert payload["products_reset"] == 2
+    assert deleted_paths == ["/threads/thread-1", "/threads/thread-2"]
+    assert product_updates == [
+        (
+            "state-p1",
+            "1688",
+            {"status": "all_pendding", "locked_at": None, "locked_by": None},
+        ),
+        (
+            "summary-p2",
+            "1688",
+            {"status": "all_pendding", "locked_at": None, "locked_by": None},
+        ),
+    ]
+
+
 def test_control_api_reports_external_langgraph_server(monkeypatch) -> None:
     monkeypatch.setattr(control_api, "_langgraph_online", lambda api_url: True)
     monkeypatch.setattr(control_api, "_current_managed_process", lambda: None)

@@ -126,6 +126,20 @@ export type ClearEnrouteLearningResponse = {
   message: string;
 };
 
+export type ClearFlowsResponse = {
+  mode: "clear_flows";
+  api_url: string;
+  assistant_id: string;
+  online: boolean;
+  thread_count: number;
+  deleted_threads: number;
+  products_reset: number;
+  skipped_products: number;
+  items: Array<Record<string, unknown>>;
+  message: string;
+  error?: string;
+};
+
 export type PromptVersionInfo = {
   version: number;
   file: string;
@@ -228,6 +242,21 @@ export function listEnrouteLearning() {
 export function clearEnrouteLearning() {
   return requestJson<ClearEnrouteLearningResponse>("/api/enroute-learning", {
     method: "DELETE",
+  });
+}
+
+export function clearWorkflowFlows(
+  apiUrl: string,
+  assistantId: string,
+  threadLimit = 100,
+) {
+  return requestJson<ClearFlowsResponse>("/api/workflows/clear-flows", {
+    method: "POST",
+    body: JSON.stringify({
+      api_url: apiUrl,
+      assistant_id: assistantId,
+      thread_limit: threadLimit,
+    }),
   });
 }
 
