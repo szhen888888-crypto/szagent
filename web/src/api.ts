@@ -119,6 +119,13 @@ export type EnrouteLearningResponse = {
   items: EnrouteLearningItem[];
 };
 
+export type ClearEnrouteLearningResponse = {
+  deleted_count: number;
+  total_before: number;
+  total_after: number;
+  message: string;
+};
+
 export type PromptVersionInfo = {
   version: number;
   file: string;
@@ -216,6 +223,12 @@ export function listModelProfiles() {
 
 export function listEnrouteLearning() {
   return requestJson<EnrouteLearningResponse>("/api/enroute-learning");
+}
+
+export function clearEnrouteLearning() {
+  return requestJson<ClearEnrouteLearningResponse>("/api/enroute-learning", {
+    method: "DELETE",
+  });
 }
 
 export function listPrompts() {

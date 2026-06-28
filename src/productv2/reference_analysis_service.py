@@ -26,6 +26,7 @@ class ModelStyleAnalysis(BaseModel):
     face_style: str = ""
     expression: str = ""
     skin_finish: str = ""
+    makeup_style: str = ""
     posture: str = ""
     mood: str = ""
 

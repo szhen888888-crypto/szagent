@@ -537,3 +537,41 @@ def test_control_api_lists_enroute_learning(tmp_path, monkeypatch) -> None:
         payload["items"][0]["selected_model_profile"]["profile_key"]
         == "romantic_rebel_european"
     )
+
+
+def test_control_api_clears_enroute_learning(tmp_path, monkeypatch) -> None:
+    database_path = tmp_path / "productv2.db"
+    monkeypatch.setattr(
+        control_api,
+        "Settings",
+        lambda: type(
+            "SettingsStub",
+            (),
+            {"productv2_database_path": database_path},
+        )(),
+    )
+
+    from productv2.db import load_model_profiles, sync_default_model_profiles
+    from productv2.db import upsert_enroute_image_analysis
+
+    sync_default_model_profiles(database_path, tmp_path / "model_profiles")
+    upsert_enroute_image_analysis(
+        database_path,
+        enroute_product_id="necklaces:demo",
+        enroute_category="necklaces",
+        enroute_title="Demo Necklace",
+        enroute_handle="demo-necklace",
+        image_path="/tmp/enroute/02.jpg",
+        analysis_json={"summary": "适合短链。"},
+        summary="适合短链。",
+    )
+
+    client = TestClient(control_api.app)
+    response = client.delete("/api/enroute-learning")
+
+    assert response.status_code == 200
+    assert response.json()["deleted_count"] == 1
+    assert response.json()["total_after"] == 0
+    assert response.json()["message"] == "已清理 1 条 Enroute 逆向分析缓存。"
+    assert client.get("/api/enroute-learning").json()["total"] == 0
+    assert len(load_model_profiles(database_path)) > 0

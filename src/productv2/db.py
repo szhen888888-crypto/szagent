@@ -722,6 +722,26 @@ def list_enroute_image_analyses(
     return [_row_to_enroute_image_analysis(row) for row in rows]
 
 
+def clear_enroute_image_analyses(database_path: str | Path) -> dict[str, int]:
+    """Delete cached Enroute reverse analyses without touching products or models."""
+
+    init_database(database_path)
+    with connect_database(database_path) as connection:
+        total_before = connection.execute(
+            "SELECT COUNT(*) FROM enroute_image_analyses"
+        ).fetchone()[0]
+        connection.execute("DELETE FROM enroute_image_analyses")
+        total_after = connection.execute(
+            "SELECT COUNT(*) FROM enroute_image_analyses"
+        ).fetchone()[0]
+
+    return {
+        "deleted_count": int(total_before - total_after),
+        "total_before": int(total_before),
+        "total_after": int(total_after),
+    }
+
+
 def upsert_enroute_image_analysis(
     database_path: str | Path,
     *,

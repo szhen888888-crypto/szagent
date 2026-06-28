@@ -22,6 +22,7 @@ import {
   Square,
 } from "lucide-react";
 import {
+  clearEnrouteLearning,
   getServerStatus,
   getThreadState,
   listEnrouteLearning,
@@ -59,6 +60,18 @@ import { Textarea } from "./components/ui/textarea";
 const DEFAULT_API_URL = "http://127.0.0.1:2024";
 const DEFAULT_ASSISTANT_ID = "product_listing";
 type PageId = "tasks" | "models" | "learning" | "prompts";
+type ActionKey =
+  | "refresh"
+  | "server-start"
+  | "server-stop"
+  | "server-restart"
+  | "workflow-start"
+  | "workflow-restart"
+  | "clear-enroute"
+  | "resume-approve"
+  | "resume-regenerate"
+  | "resume-reject"
+  | "resume-custom";
 
 export default function App() {
   const [page, setPage] = useState<PageId>("tasks");
@@ -79,6 +92,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
+  const [activeAction, setActiveAction] = useState<ActionKey | null>(null);
   const selectedThreadIdRef = useRef(selectedThreadId);
 
   const selectedThread = useMemo(
@@ -186,7 +200,29 @@ export default function App() {
     }
   }
 
-  async function runAction(action: () => Promise<Record<string, unknown>>) {
+  async function refreshCurrentPage() {
+    setActiveAction("refresh");
+    try {
+      if (page === "tasks") {
+        await refreshAll();
+      } else if (page === "models") {
+        await refreshModelProfiles();
+      } else if (page === "learning") {
+        await refreshEnrouteLearning();
+      } else {
+        await refreshPrompts();
+      }
+    } finally {
+      setActiveAction(null);
+    }
+  }
+
+  async function runAction(
+    action: () => Promise<Record<string, unknown>>,
+    actionKey: ActionKey,
+    options: { refreshTasks?: boolean } = {},
+  ) {
+    setActiveAction(actionKey);
     setLoading(true);
     setError("");
     setNotice("");
@@ -200,12 +236,17 @@ export default function App() {
       if (shouldSelectResultThread && typeof result.thread_id === "string") {
         setSelectedThreadId(result.thread_id);
       }
-      await refreshAll();
-      await refreshThreadState(shouldSelectResultThread ? resultThreadId : selectedThreadId);
+      if (options.refreshTasks ?? true) {
+        await refreshAll();
+        await refreshThreadState(
+          shouldSelectResultThread ? resultThreadId : selectedThreadId,
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      setActiveAction(null);
     }
   }
 
@@ -268,16 +309,10 @@ export default function App() {
             ) : null}
             <Button
               variant="outline"
-              onClick={() =>
-                page === "tasks"
-                  ? refreshAll()
-                  : page === "models"
-                    ? refreshModelProfiles()
-                    : page === "learning"
-                      ? refreshEnrouteLearning()
-                      : refreshPrompts()
-              }
+              onClick={refreshCurrentPage}
               disabled={loading}
+              loading={activeAction === "refresh"}
+              loadingText="刷新中"
             >
               <RefreshCcw className="h-4 w-4" />
               刷新
@@ -294,16 +329,39 @@ export default function App() {
               <ServerPanel
                 server={server}
                 loading={loading}
-                onStart={() => runAction(() => startServer(2024) as Promise<Record<string, unknown>>)}
-                onStop={() => runAction(() => stopServer() as Promise<Record<string, unknown>>)}
-                onRestart={() => runAction(() => restartServer(2024) as Promise<Record<string, unknown>>)}
+                activeAction={activeAction}
+                onStart={() =>
+                  runAction(
+                    () => startServer(2024) as Promise<Record<string, unknown>>,
+                    "server-start",
+                  )
+                }
+                onStop={() =>
+                  runAction(
+                    () => stopServer() as Promise<Record<string, unknown>>,
+                    "server-stop",
+                  )
+                }
+                onRestart={() =>
+                  runAction(
+                    () => restartServer(2024) as Promise<Record<string, unknown>>,
+                    "server-restart",
+                  )
+                }
               />
               <WorkflowPanel
                 loading={loading}
-                onStart={() => runAction(() => startWorkflow(apiUrl, assistantId))}
+                activeAction={activeAction}
+                onStart={() =>
+                  runAction(
+                    () => startWorkflow(apiUrl, assistantId),
+                    "workflow-start",
+                  )
+                }
                 onRestart={() =>
-                  runAction(() =>
-                    restartWorkflow(apiUrl, assistantId, selectedThreadId),
+                  runAction(
+                    () => restartWorkflow(apiUrl, assistantId, selectedThreadId),
+                    "workflow-restart",
                   )
                 }
               />
@@ -321,14 +379,17 @@ export default function App() {
                 resumeJson={resumeJson}
                 setResumeJson={setResumeJson}
                 loading={loading}
-                onResume={(payload) =>
-                  runAction(() =>
-                    resumeThread(
-                      apiUrl,
-                      assistantId,
-                      selectedThreadId,
-                      payload,
-                    ),
+                activeAction={activeAction}
+                onResume={(payload, actionKey) =>
+                  runAction(
+                    () =>
+                      resumeThread(
+                        apiUrl,
+                        assistantId,
+                        selectedThreadId,
+                        payload,
+                      ),
+                    actionKey,
                   )
                 }
                 onOpenStudio={() => selectedThread?.studio_url && window.open(selectedThread.studio_url, "_blank")}
@@ -339,7 +400,22 @@ export default function App() {
         ) : page === "models" ? (
           <ModelProfilesPage profiles={modelProfiles?.profiles ?? []} />
         ) : page === "learning" ? (
-          <EnrouteLearningPage learning={enrouteLearning} />
+          <EnrouteLearningPage
+            learning={enrouteLearning}
+            onClear={() =>
+              runAction(
+                async () => {
+                  const result = await clearEnrouteLearning();
+                  await refreshEnrouteLearning({ silent: true });
+                  return result;
+                },
+                "clear-enroute",
+                { refreshTasks: false },
+              )
+            }
+            loading={loading}
+            activeAction={activeAction}
+          />
         ) : (
           <PromptsPage
             prompts={prompts?.prompts ?? []}
@@ -399,12 +475,14 @@ function PageNav({
 function ServerPanel({
   server,
   loading,
+  activeAction,
   onStart,
   onStop,
   onRestart,
 }: {
   server: ServerStatus | null;
   loading: boolean;
+  activeAction: ActionKey | null;
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
@@ -421,15 +499,33 @@ function ServerPanel({
         <InfoRow label="运行时长" value={server?.uptime_seconds ? `${server.uptime_seconds}s` : "-"} />
         {server?.message ? <p className="text-sm text-zinc-500">{server.message}</p> : null}
         <div className="grid grid-cols-3 gap-2">
-          <Button onClick={onStart} disabled={loading} variant="secondary">
+          <Button
+            onClick={onStart}
+            disabled={loading}
+            loading={activeAction === "server-start"}
+            loadingText="启动中"
+            variant="secondary"
+          >
             <Power className="h-4 w-4" />
             启动
           </Button>
-          <Button onClick={onStop} disabled={loading} variant="outline">
+          <Button
+            onClick={onStop}
+            disabled={loading}
+            loading={activeAction === "server-stop"}
+            loadingText="停止中"
+            variant="outline"
+          >
             <Square className="h-4 w-4" />
             停止
           </Button>
-          <Button onClick={onRestart} disabled={loading} variant="outline">
+          <Button
+            onClick={onRestart}
+            disabled={loading}
+            loading={activeAction === "server-restart"}
+            loadingText="重启中"
+            variant="outline"
+          >
             <RotateCcw className="h-4 w-4" />
             重启
           </Button>
@@ -441,10 +537,12 @@ function ServerPanel({
 
 function WorkflowPanel({
   loading,
+  activeAction,
   onStart,
   onRestart,
 }: {
   loading: boolean;
+  activeAction: ActionKey | null;
   onStart: () => void;
   onRestart: () => void;
 }) {
@@ -454,11 +552,22 @@ function WorkflowPanel({
         <CardTitle>Workflow</CardTitle>
       </CardHeader>
       <CardContent className="grid grid-cols-2 gap-2">
-        <Button onClick={onStart} disabled={loading}>
+        <Button
+          onClick={onStart}
+          disabled={loading}
+          loading={activeAction === "workflow-start"}
+          loadingText="启动中"
+        >
           <Play className="h-4 w-4" />
           新启动
         </Button>
-        <Button onClick={onRestart} disabled={loading} variant="outline">
+        <Button
+          onClick={onRestart}
+          disabled={loading}
+          loading={activeAction === "workflow-restart"}
+          loadingText="恢复中"
+          variant="outline"
+        >
           <RefreshCcw className="h-4 w-4" />
           安全恢复
         </Button>
@@ -640,8 +749,14 @@ function ModelProfileCard({ profile }: { profile: ModelProfile }) {
 
 function EnrouteLearningPage({
   learning,
+  onClear,
+  loading,
+  activeAction,
 }: {
   learning: EnrouteLearningResponse | null;
+  onClear: () => void;
+  loading: boolean;
+  activeAction: ActionKey | null;
 }) {
   const [category, setCategory] = useState("all");
   const items = learning?.items ?? [];
@@ -660,7 +775,19 @@ function EnrouteLearningPage({
             已缓存的 Enroute 佩戴参考逆向分析，用于后续商品匹配和模特选择。
           </p>
         </div>
-        <Badge variant="secondary">{learning?.total ?? 0} 条学习数据</Badge>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="secondary">{learning?.total ?? 0} 条学习数据</Badge>
+          <Button
+            variant="destructive"
+            onClick={onClear}
+            disabled={loading || (learning?.total ?? 0) === 0}
+            loading={activeAction === "clear-enroute"}
+            loadingText="清理中"
+          >
+            <RotateCcw className="h-4 w-4" />
+            清理逆向数据
+          </Button>
+        </div>
       </div>
 
       <div className="grid gap-3 md:grid-cols-4">
@@ -1001,6 +1128,7 @@ function ThreadDetail({
   resumeJson,
   setResumeJson,
   loading,
+  activeAction,
   onResume,
   onOpenStudio,
 }: {
@@ -1009,7 +1137,8 @@ function ThreadDetail({
   resumeJson: string;
   setResumeJson: (value: string) => void;
   loading: boolean;
-  onResume: (payload: unknown) => void;
+  activeAction: ActionKey | null;
+  onResume: (payload: unknown, actionKey: ActionKey) => void;
   onOpenStudio: () => void;
 }) {
   if (!thread) {
@@ -1049,6 +1178,7 @@ function ThreadDetail({
           review={grsaiReview}
           canResume={canResume}
           loading={loading}
+          activeAction={activeAction}
           resumeJson={resumeJson}
           setResumeJson={setResumeJson}
           onResume={onResume}
@@ -1062,15 +1192,17 @@ function ThreadDetail({
 function ManualReviewActions({
   canResume,
   loading,
+  activeAction,
   resumeJson,
   setResumeJson,
   onResume,
 }: {
   canResume: boolean;
   loading: boolean;
+  activeAction: ActionKey | null;
   resumeJson: string;
   setResumeJson: (value: string) => void;
-  onResume: (payload: unknown) => void;
+  onResume: (payload: unknown, actionKey: ActionKey) => void;
 }) {
   const disabled = loading || !canResume;
   const [parseError, setParseError] = useState("");
@@ -1079,7 +1211,7 @@ function ManualReviewActions({
     try {
       const payload = JSON.parse(resumeJson);
       setParseError("");
-      onResume(payload);
+      onResume(payload, "resume-custom");
     } catch (err) {
       setParseError(err instanceof Error ? err.message : "无效的 JSON");
     }
@@ -1089,20 +1221,29 @@ function ManualReviewActions({
     <div className="space-y-3">
       <p className="text-sm font-medium">审核动作</p>
       <div className="grid gap-2 md:grid-cols-3">
-        <Button onClick={() => onResume({ action: "approve" })} disabled={disabled}>
+        <Button
+          onClick={() => onResume({ action: "approve" }, "resume-approve")}
+          disabled={disabled}
+          loading={activeAction === "resume-approve"}
+          loadingText="提交中"
+        >
           Approve
         </Button>
         <Button
           variant="outline"
-          onClick={() => onResume({ action: "regenerate" })}
+          onClick={() => onResume({ action: "regenerate" }, "resume-regenerate")}
           disabled={disabled}
+          loading={activeAction === "resume-regenerate"}
+          loadingText="提交中"
         >
           Regenerate
         </Button>
         <Button
           variant="destructive"
-          onClick={() => onResume({ action: "reject" })}
+          onClick={() => onResume({ action: "reject" }, "resume-reject")}
           disabled={disabled}
+          loading={activeAction === "resume-reject"}
+          loadingText="提交中"
         >
           Reject
         </Button>
@@ -1123,6 +1264,8 @@ function ManualReviewActions({
             variant="outline"
             onClick={submitCustomJson}
             disabled={disabled}
+            loading={activeAction === "resume-custom"}
+            loadingText="提交中"
           >
             <PauseCircle className="h-4 w-4" />
             提交自定义 JSON
@@ -1150,6 +1293,7 @@ function WorkflowNodesPanel({
   review,
   canResume,
   loading,
+  activeAction,
   resumeJson,
   setResumeJson,
   onResume,
@@ -1159,9 +1303,10 @@ function WorkflowNodesPanel({
   review: GrsaiReview;
   canResume: boolean;
   loading: boolean;
+  activeAction: ActionKey | null;
   resumeJson: string;
   setResumeJson: (value: string) => void;
-  onResume: (payload: unknown) => void;
+  onResume: (payload: unknown, actionKey: ActionKey) => void;
 }) {
   const nodes = buildWorkflowNodes({
     thread,
@@ -1169,6 +1314,7 @@ function WorkflowNodesPanel({
     review,
     canResume,
     loading,
+    activeAction,
     resumeJson,
     setResumeJson,
     onResume,
@@ -1235,6 +1381,7 @@ function buildWorkflowNodes({
   review,
   canResume,
   loading,
+  activeAction,
   resumeJson,
   setResumeJson,
   onResume,
@@ -1244,9 +1391,10 @@ function buildWorkflowNodes({
   review: GrsaiReview;
   canResume: boolean;
   loading: boolean;
+  activeAction: ActionKey | null;
   resumeJson: string;
   setResumeJson: (value: string) => void;
-  onResume: (payload: unknown) => void;
+  onResume: (payload: unknown, actionKey: ActionKey) => void;
 }): WorkflowNode[] {
   const root = asRecord(state);
   const values = asRecord(root.values);
@@ -1343,7 +1491,8 @@ function buildWorkflowNodes({
           review={review}
           canResume={canResume}
           loading={loading}
-          onRetry={() => onResume({ action: "regenerate" })}
+          activeAction={activeAction}
+          onRetry={() => onResume({ action: "regenerate" }, "resume-regenerate")}
         />
       ),
     },
@@ -1365,6 +1514,7 @@ function buildWorkflowNodes({
         <ManualReviewActions
           canResume={canResume}
           loading={loading}
+          activeAction={activeAction}
           resumeJson={resumeJson}
           setResumeJson={setResumeJson}
           onResume={onResume}
@@ -1658,11 +1808,13 @@ function GrsaiNodePanel({
   review,
   canResume,
   loading,
+  activeAction,
   onRetry,
 }: {
   review: GrsaiReview;
   canResume: boolean;
   loading: boolean;
+  activeAction: ActionKey | null;
   onRetry: () => void;
 }) {
   const disabled = loading || !canResume;
@@ -1679,6 +1831,8 @@ function GrsaiNodePanel({
           variant="outline"
           onClick={onRetry}
           disabled={disabled}
+          loading={activeAction === "resume-regenerate"}
+          loadingText="提交中"
           title={canResume ? "重新生成穿戴图" : "等待人工审核时可重试"}
         >
           <RefreshCcw className="h-4 w-4" />

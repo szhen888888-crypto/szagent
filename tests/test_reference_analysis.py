@@ -37,6 +37,7 @@ def test_parse_enroute_reference_analysis_cleans_instruction_lists() -> None:
             "face_style": "真实欧美日常创作者",
             "expression": "冷静，不营业",
             "skin_finish": "真实纹理，低妆感",
+            "makeup_style": "低妆感，嘴唇和美甲只作为轻微可见细节",
             "posture": "偏轴侧身，肩颈放松",
             "mood": "冷淡松弛"
           },
@@ -84,6 +85,7 @@ def test_parse_enroute_reference_analysis_cleans_instruction_lists() -> None:
         "face_style": "真实欧美日常创作者",
         "expression": "冷静，不营业",
         "skin_finish": "真实纹理，低妆感",
+        "makeup_style": "低妆感，嘴唇和美甲只作为轻微可见细节",
         "posture": "偏轴侧身，肩颈放松",
         "mood": "冷淡松弛",
     }
@@ -123,6 +125,12 @@ def test_build_enroute_reference_analysis_payload_uses_responses_vision() -> Non
     assert "scene_style" in system_content[0]["text"]
     assert "shooting_style" in system_content[0]["text"]
     assert "selected_model_profile" in system_content[0]["text"]
+    assert "makeup_style" in system_content[0]["text"]
+    assert "lip_makeup" not in system_content[0]["text"]
+    assert "nail_style" not in system_content[0]["text"]
+    assert "嘴唇" in system_content[0]["text"]
+    assert "美甲" in system_content[0]["text"]
+    assert "不要把嘴唇或美甲作为重点" in system_content[0]["text"]
     assert "romantic_rebel_european" in system_content[0]["text"]
     assert "/tmp/model.jpg" in system_content[0]["text"]
     assert "product_context" not in system_content[0]["text"]

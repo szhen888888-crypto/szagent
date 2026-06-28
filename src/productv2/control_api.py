@@ -28,6 +28,7 @@ from productv2.cli import (
 )
 from productv2.config import PROJECT_ROOT
 from productv2.config import Settings
+from productv2.db import clear_enroute_image_analyses
 from productv2.db import get_product_by_identity
 from productv2.db import list_enroute_image_analyses
 from productv2.feishu_long_connection import FeishuLongConnectionServer
@@ -357,6 +358,16 @@ def enroute_learning() -> dict[str, Any]:
             for category, count in sorted(categories.items())
         ],
         "items": items,
+    }
+
+
+@app.delete("/api/enroute-learning")
+def clear_enroute_learning() -> dict[str, Any]:
+    settings = Settings()
+    result = clear_enroute_image_analyses(settings.productv2_database_path)
+    return {
+        **result,
+        "message": f"已清理 {result['deleted_count']} 条 Enroute 逆向分析缓存。",
     }
 
 
