@@ -45,6 +45,8 @@ uv run productv2 restart-workflow --resume-json '{"action":"approve"}'
 tools/control-console.sh start
 ```
 
+该脚本会同时启动 `langgraph dev`、控制 API 和 Web 控制台。
+
 默认地址：
 
 - 控制 API：`http://127.0.0.1:8765`
@@ -58,11 +60,13 @@ tools/control-console.sh status
 tools/control-console.sh stop
 tools/control-console.sh restart
 tools/control-console.sh start --api-port 8766 --ui-port 5174
+tools/control-console.sh start --langgraph-port 2025
 ```
 
 也可以分别启动：
 
 ```bash
+uv run langgraph dev --allow-blocking
 uv run productv2 control-api
 uv run productv2 control-ui
 ```

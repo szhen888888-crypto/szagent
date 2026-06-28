@@ -35,6 +35,13 @@ from productv2.feishu_long_connection import list_feishu_event_log
 from productv2.manual_review import manual_review_payload_from_state
 from productv2.model_profiles import VIRTUAL_MODEL_PROFILES
 from productv2.model_profiles import virtual_model_profile_summary
+from productv2.prompts_service import (
+    PromptAccessError,
+    create_prompt_version,
+    list_prompts,
+    set_prompt_override,
+    write_prompt,
+)
 from productv2.review_channels import notify_feishu_review
 
 
@@ -101,6 +108,22 @@ class ResumeThreadRequest(BaseModel):
     api_url: str = DEFAULT_LANGGRAPH_API_URL
     assistant_id: str = DEFAULT_ASSISTANT_ID
     resume: Any = Field(default_factory=dict)
+
+
+class PromptSaveRequest(BaseModel):
+    dir: str
+    version: int
+    content: str
+
+
+class PromptVersionRequest(BaseModel):
+    dir: str
+    content: str
+
+
+class PromptOverrideRequest(BaseModel):
+    dir: str
+    version: int | None = None
 
 
 _managed_process: subprocess.Popen[str] | None = None
@@ -335,6 +358,35 @@ def enroute_learning() -> dict[str, Any]:
         ],
         "items": items,
     }
+
+
+@app.get("/api/prompts")
+def get_prompts() -> dict[str, Any]:
+    return {"prompts": list_prompts()}
+
+
+@app.put("/api/prompts/content")
+def save_prompt_content(payload: PromptSaveRequest) -> dict[str, Any]:
+    try:
+        return write_prompt(payload.dir, payload.version, payload.content)
+    except PromptAccessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/prompts/version")
+def add_prompt_version(payload: PromptVersionRequest) -> dict[str, Any]:
+    try:
+        return create_prompt_version(payload.dir, payload.content)
+    except PromptAccessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/prompts/override")
+def update_prompt_override(payload: PromptOverrideRequest) -> dict[str, Any]:
+    try:
+        return set_prompt_override(payload.dir, payload.version)
+    except PromptAccessError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/workflows/start")

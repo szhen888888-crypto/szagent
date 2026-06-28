@@ -11,6 +11,7 @@ import {
   BookOpenCheck,
   Activity,
   ExternalLink,
+  FileText,
   GalleryHorizontalEnd,
   Images,
   PauseCircle,
@@ -25,11 +26,17 @@ import {
   getThreadState,
   listEnrouteLearning,
   listModelProfiles,
+  listPrompts,
   listThreads,
   EnrouteLearningItem,
   EnrouteLearningResponse,
   ModelProfile,
   ModelProfilesResponse,
+  PromptInfo,
+  PromptsResponse,
+  createPromptVersion,
+  savePromptContent,
+  setPromptOverride,
   restartServer,
   restartWorkflow,
   resumeThread,
@@ -51,7 +58,7 @@ import { Textarea } from "./components/ui/textarea";
 
 const DEFAULT_API_URL = "http://127.0.0.1:2024";
 const DEFAULT_ASSISTANT_ID = "product_listing";
-type PageId = "tasks" | "models" | "learning";
+type PageId = "tasks" | "models" | "learning" | "prompts";
 
 export default function App() {
   const [page, setPage] = useState<PageId>("tasks");
@@ -64,6 +71,7 @@ export default function App() {
   );
   const [enrouteLearning, setEnrouteLearning] =
     useState<EnrouteLearningResponse | null>(null);
+  const [prompts, setPrompts] = useState<PromptsResponse | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState("");
   const [threadState, setThreadState] = useState<ThreadStateResponse | null>(null);
   const [resumeJson, setResumeJson] = useState('{"action":"approve"}');
@@ -161,6 +169,23 @@ export default function App() {
     }
   }
 
+  async function refreshPrompts(options: { silent?: boolean } = {}) {
+    if (!options.silent) {
+      setLoading(true);
+      setError("");
+    }
+    try {
+      const promptList = await listPrompts();
+      setStableJsonState(setPrompts, promptList);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (!options.silent) {
+        setLoading(false);
+      }
+    }
+  }
+
   async function runAction(action: () => Promise<Record<string, unknown>>) {
     setLoading(true);
     setError("");
@@ -188,6 +213,7 @@ export default function App() {
     refreshAll();
     refreshModelProfiles({ silent: true });
     refreshEnrouteLearning({ silent: true });
+    refreshPrompts({ silent: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -247,7 +273,9 @@ export default function App() {
                   ? refreshAll()
                   : page === "models"
                     ? refreshModelProfiles()
-                    : refreshEnrouteLearning()
+                    : page === "learning"
+                      ? refreshEnrouteLearning()
+                      : refreshPrompts()
               }
               disabled={loading}
             >
@@ -310,8 +338,13 @@ export default function App() {
           </section>
         ) : page === "models" ? (
           <ModelProfilesPage profiles={modelProfiles?.profiles ?? []} />
-        ) : (
+        ) : page === "learning" ? (
           <EnrouteLearningPage learning={enrouteLearning} />
+        ) : (
+          <PromptsPage
+            prompts={prompts?.prompts ?? []}
+            onRefresh={() => refreshPrompts({ silent: true })}
+          />
         )}
       </div>
     </main>
@@ -350,6 +383,14 @@ function PageNav({
       >
         <BookOpenCheck className="h-4 w-4" />
         学习
+      </Button>
+      <Button
+        className="h-8 px-2"
+        variant={page === "prompts" ? "default" : "ghost"}
+        onClick={() => onChange("prompts")}
+      >
+        <FileText className="h-4 w-4" />
+        提示词
       </Button>
     </nav>
   );
@@ -720,6 +761,234 @@ function EnrouteLearningCard({ item }: { item: EnrouteLearningItem }) {
               <CompactJson value={analysis} />
             </div>
           </details>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function PromptsPage({
+  prompts,
+  onRefresh,
+}: {
+  prompts: PromptInfo[];
+  onRefresh: () => Promise<void> | void;
+}) {
+  const [selectedDir, setSelectedDir] = useState("");
+  const selected =
+    prompts.find((item) => item.dir === selectedDir) ?? prompts[0];
+
+  if (prompts.length === 0) {
+    return (
+      <Card>
+        <CardContent className="p-4">
+          <p className="text-sm text-zinc-500">
+            暂无提示词。请确认控制 API 已启动。
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <section className="grid gap-4 lg:grid-cols-[280px_1fr]">
+      <Card className="self-start">
+        <CardHeader>
+          <CardTitle>提示词列表</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1">
+          {prompts.map((item) => {
+            const active = item.dir === selected.dir;
+            const orderTag = item.order < 90 ? `#${item.order}` : "实验";
+            return (
+              <button
+                key={item.dir}
+                onClick={() => setSelectedDir(item.dir)}
+                className={`w-full rounded-md border p-2 text-left transition-colors ${
+                  active
+                    ? "border-zinc-950 bg-zinc-50"
+                    : "border-zinc-200 bg-white hover:bg-zinc-50"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span
+                      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                        item.order < 90
+                          ? "bg-zinc-900 text-white"
+                          : "bg-zinc-100 text-zinc-500"
+                      }`}
+                    >
+                      {orderTag}
+                    </span>
+                    <span className="truncate text-sm font-medium">{item.label}</span>
+                  </div>
+                  <Badge variant={item.override != null ? "warning" : "secondary"}>
+                    v{item.effective_version}
+                    {item.override != null ? " 固定" : ""}
+                  </Badge>
+                </div>
+                {item.purpose ? (
+                  <p className="mt-1 line-clamp-2 text-xs text-zinc-500">
+                    {item.purpose}
+                  </p>
+                ) : null}
+                <p className="mt-1 truncate font-mono text-[10px] text-zinc-400">
+                  {item.dir}
+                </p>
+              </button>
+            );
+          })}
+        </CardContent>
+      </Card>
+
+      <PromptEditor
+        key={`${selected.dir}:${selected.effective_version}:${selected.versions.length}`}
+        prompt={selected}
+        onRefresh={onRefresh}
+      />
+    </section>
+  );
+}
+
+function PromptEditor({
+  prompt,
+  onRefresh,
+}: {
+  prompt: PromptInfo;
+  onRefresh: () => Promise<void> | void;
+}) {
+  const [draft, setDraft] = useState(prompt.content);
+  const [baseline, setBaseline] = useState(prompt.content);
+  const [status, setStatus] = useState("");
+  const [statusKind, setStatusKind] = useState<"ok" | "error">("ok");
+  const [busy, setBusy] = useState(false);
+  const dirty = draft !== baseline;
+
+  async function run(
+    action: () => Promise<PromptInfo>,
+    okMessage: string,
+    nextBaseline: string,
+  ) {
+    setBusy(true);
+    setStatus("");
+    try {
+      await action();
+      setBaseline(nextBaseline);
+      setStatusKind("ok");
+      setStatus(okMessage);
+      await onRefresh();
+    } catch (err) {
+      setStatusKind("error");
+      setStatus(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-start justify-between gap-3">
+        <div className="min-w-0">
+          <CardTitle>{prompt.label}</CardTitle>
+          {prompt.purpose ? (
+            <p className="mt-1 text-sm text-zinc-600">{prompt.purpose}</p>
+          ) : null}
+          <p className="mt-1 font-mono text-xs text-zinc-400">{prompt.dir}</p>
+          <p className="mt-1 text-xs text-zinc-500">
+            {prompt.order < 90
+              ? `工作流第 ${prompt.order} 步`
+              : "未接入主工作流"}
+            {prompt.node ? ` · 节点 ${prompt.node}` : ""} · 正在编辑 v
+            {prompt.effective_version}
+            {prompt.override != null ? "（已固定）" : "（默认最新版本）"}
+          </p>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-zinc-500">生效版本：</span>
+          {prompt.versions.map((version) => (
+            <Button
+              key={version.version}
+              className="h-8 px-2 text-xs"
+              variant={version.is_effective ? "default" : "outline"}
+              disabled={busy || dirty || version.is_effective}
+              onClick={() =>
+                run(
+                  () => setPromptOverride(prompt.dir, version.version),
+                  `已固定到 v${version.version}`,
+                  draft,
+                )
+              }
+            >
+              v{version.version}
+            </Button>
+          ))}
+          {prompt.override != null ? (
+            <Button
+              className="h-8 px-2 text-xs"
+              variant="ghost"
+              disabled={busy || dirty}
+              onClick={() =>
+                run(() => setPromptOverride(prompt.dir, null), "已恢复为最新版本", draft)
+              }
+            >
+              用最新版本
+            </Button>
+          ) : null}
+          {dirty ? (
+            <span className="text-xs text-amber-600">有未保存修改，切换版本前请先保存或重置</span>
+          ) : null}
+        </div>
+
+        <Textarea
+          className="min-h-[440px] font-mono text-xs leading-relaxed"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            disabled={busy || !dirty}
+            onClick={() =>
+              run(
+                () => savePromptContent(prompt.dir, prompt.effective_version, draft),
+                `已保存到 v${prompt.effective_version}`,
+                draft,
+              )
+            }
+          >
+            保存到 v{prompt.effective_version}
+          </Button>
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() =>
+              run(() => createPromptVersion(prompt.dir, draft), "已另存为新版本", draft)
+            }
+          >
+            另存为新版本
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={busy || !dirty}
+            onClick={() => {
+              setDraft(baseline);
+              setStatus("");
+            }}
+          >
+            重置
+          </Button>
+          {status ? (
+            <span
+              className={`text-xs ${
+                statusKind === "error" ? "text-red-600" : "text-emerald-600"
+              }`}
+            >
+              {status}
+            </span>
+          ) : null}
         </div>
       </CardContent>
     </Card>

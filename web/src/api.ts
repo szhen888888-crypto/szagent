@@ -119,6 +119,30 @@ export type EnrouteLearningResponse = {
   items: EnrouteLearningItem[];
 };
 
+export type PromptVersionInfo = {
+  version: number;
+  file: string;
+  is_effective: boolean;
+};
+
+export type PromptInfo = {
+  dir: string;
+  label: string;
+  purpose: string;
+  node: string;
+  order: number;
+  override: number | null;
+  effective_version: number;
+  versions: PromptVersionInfo[];
+  content: string;
+  created_version?: number;
+};
+
+export type PromptsResponse = {
+  prompts: PromptInfo[];
+};
+
+
 const CONTROL_API_BASE =
   import.meta.env.VITE_CONTROL_API_BASE ?? "http://127.0.0.1:8765";
 
@@ -192,6 +216,31 @@ export function listModelProfiles() {
 
 export function listEnrouteLearning() {
   return requestJson<EnrouteLearningResponse>("/api/enroute-learning");
+}
+
+export function listPrompts() {
+  return requestJson<PromptsResponse>("/api/prompts");
+}
+
+export function savePromptContent(dir: string, version: number, content: string) {
+  return requestJson<PromptInfo>("/api/prompts/content", {
+    method: "PUT",
+    body: JSON.stringify({ dir, version, content }),
+  });
+}
+
+export function createPromptVersion(dir: string, content: string) {
+  return requestJson<PromptInfo>("/api/prompts/version", {
+    method: "POST",
+    body: JSON.stringify({ dir, content }),
+  });
+}
+
+export function setPromptOverride(dir: string, version: number | null) {
+  return requestJson<PromptInfo>("/api/prompts/override", {
+    method: "POST",
+    body: JSON.stringify({ dir, version }),
+  });
 }
 
 export function startWorkflow(apiUrl: string, assistantId: string) {

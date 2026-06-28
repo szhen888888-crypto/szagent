@@ -5,8 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTROL_DIR="$ROOT_DIR/.control"
 API_PID_FILE="$CONTROL_DIR/control-api.pid"
 UI_PID_FILE="$CONTROL_DIR/control-ui.pid"
+LANGGRAPH_PID_FILE="$CONTROL_DIR/langgraph-dev.pid"
 API_LOG_FILE="$CONTROL_DIR/control-api.log"
 UI_LOG_FILE="$CONTROL_DIR/control-ui.log"
+LANGGRAPH_LOG_FILE="$CONTROL_DIR/langgraph-dev.log"
 
 ACTION="${1:-}"
 if [[ -z "$ACTION" ]]; then
@@ -19,6 +21,8 @@ API_HOST="127.0.0.1"
 API_PORT="8765"
 UI_HOST="127.0.0.1"
 UI_PORT="5173"
+LANGGRAPH_HOST="127.0.0.1"
+LANGGRAPH_PORT="2024"
 
 usage() {
   cat <<'EOF'
@@ -29,11 +33,13 @@ Usage:
   tools/control-console.sh status
 
 Options:
-  --api-host HOST    Control API host. Default: 127.0.0.1
-  --api-port PORT    Control API port. Default: 8765
-  --ui-host HOST     Web UI host. Default: 127.0.0.1
-  --ui-port PORT     Web UI port. Default: 5173
-  -h, --help         Show this help.
+  --api-host HOST         Control API host. Default: 127.0.0.1
+  --api-port PORT         Control API port. Default: 8765
+  --ui-host HOST          Web UI host. Default: 127.0.0.1
+  --ui-port PORT          Web UI port. Default: 5173
+  --langgraph-host HOST   LangGraph dev host. Default: 127.0.0.1
+  --langgraph-port PORT   LangGraph dev port. Default: 2024
+  -h, --help              Show this help.
 
 Examples:
   tools/control-console.sh start
@@ -58,6 +64,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ui-port)
       UI_PORT="${2:?missing value for --ui-port}"
+      shift 2
+      ;;
+    --langgraph-host)
+      LANGGRAPH_HOST="${2:?missing value for --langgraph-host}"
+      shift 2
+      ;;
+    --langgraph-port)
+      LANGGRAPH_PORT="${2:?missing value for --langgraph-port}"
       shift 2
       ;;
     -h|--help)
@@ -212,14 +226,27 @@ status_process() {
 start_all() {
   local api_bin="$ROOT_DIR/.venv/bin/productv2"
   local ui_bin="$ROOT_DIR/web/node_modules/.bin/vite"
+  local langgraph_bin="$ROOT_DIR/.venv/bin/langgraph"
   if [[ ! -x "$api_bin" ]]; then
     echo "Missing executable: $api_bin. Run uv sync first." >&2
+    exit 1
+  fi
+  if [[ ! -x "$langgraph_bin" ]]; then
+    echo "Missing executable: $langgraph_bin. Run uv sync --group dev first." >&2
     exit 1
   fi
   if [[ ! -x "$ui_bin" ]]; then
     echo "Missing executable: $ui_bin. Run npm install in web/ first." >&2
     exit 1
   fi
+
+  start_process \
+    "langgraph-dev" \
+    "$LANGGRAPH_PID_FILE" \
+    "$LANGGRAPH_LOG_FILE" \
+    "$ROOT_DIR" \
+    "$LANGGRAPH_PORT" \
+    "$langgraph_bin" dev --host "$LANGGRAPH_HOST" --port "$LANGGRAPH_PORT" --allow-blocking --no-browser
 
   start_process \
     "control-api" \
@@ -237,6 +264,7 @@ start_all() {
     "$UI_PORT" \
     "$ui_bin" --host "$UI_HOST" --port "$UI_PORT"
 
+  echo "LangGraph API: http://$LANGGRAPH_HOST:$LANGGRAPH_PORT"
   echo "Control API: http://$API_HOST:$API_PORT"
   echo "Web UI:      http://$UI_HOST:$UI_PORT"
 }
@@ -244,9 +272,11 @@ start_all() {
 stop_all() {
   stop_process "control-ui" "$UI_PID_FILE" "$UI_PORT" "vite"
   stop_process "control-api" "$API_PID_FILE" "$API_PORT" "productv2 control-api"
+  stop_process "langgraph-dev" "$LANGGRAPH_PID_FILE" "$LANGGRAPH_PORT" "langgraph dev"
 }
 
 status_all() {
+  status_process "langgraph-dev" "$LANGGRAPH_PID_FILE" "$LANGGRAPH_LOG_FILE" "$LANGGRAPH_PORT"
   status_process "control-api" "$API_PID_FILE" "$API_LOG_FILE" "$API_PORT"
   status_process "control-ui" "$UI_PID_FILE" "$UI_LOG_FILE" "$UI_PORT"
 }
