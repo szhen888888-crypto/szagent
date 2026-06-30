@@ -35,14 +35,15 @@
 - `src/productv2/data.py`：候选商品 JSON 数据读取与模型校验。
 - `src/productv2/db.py`：SQLite 连接、建表和候选商品导入逻辑。
 - `src/productv2/image_generation.py`：全局图片生成组件，封装 Grsai `POST /v1/api/generate` 和 `GET /v1/api/result`。
-- `src/productv2/enroute.py`：从本地 Enroute best-selling 参考图库按处理商品类目严格选择 `02.jpg` 佩戴参考图。
+- `src/productv2/enroute.py`：Enroute 类目推断与下载后图片库读取工具；主 workflow 不直接用目录统计学习数据。
+- `src/productv2/enroute_learning.py`：Enroute 学习图片库服务层，负责把下载/删除后的 `02.jpg` 参考库同步到 SQLite `enroute_learning_references` 表，并按数据库状态生成学习计划。
 - `src/productv2/reference_analysis.py`：使用 OpenAI Responses streaming 逆向分析 Enroute 佩戴参考图，按模特风格、衣服风格、场景风格和拍摄风格多维输出；LLM 禁止描述参考图产品细节。
 - `src/productv2/model_profiles.py`：inyourday 风格固定虚拟模特 profile，用于后续佩戴图生成 prompt。
 - `src/productv2/models.py`：候选商品与上架草稿的 Pydantic 领域模型。
 - `src/productv2/selection.py`：从数据库读取未完成商品，在内存中随机选择有平台适配器的商品。
 - `src/productv2/state.py`：进程内全局产品 state。核心 product 字段与数据库 `products` 表保持一致；临时流程数据放入 state extras，不硬塞入数据库字段。更新真实图片和状态字段时同步写回 SQLite。
 - `src/productv2/dev_graph.py`：`langgraph dev` 图导出文件，暴露 `product_listing` compiled graph；本地 in-memory runtime 负责持久化和 interrupt/resume，不要在导出图里手动传入自定义 checkpointer。
-- `src/productv2/graph.py`：LangGraph 商品图片处理主工作流，包含原始数据扫描入库、选品锁定、主图聚合、尺寸检测、Enroute 逆向分析、佩戴图生成和人工审核暂停。
+- `src/productv2/graph.py`：LangGraph 商品图片处理主工作流，包含原始数据扫描入库、选品锁定、主图聚合、产品合格性检测、Enroute 逆向分析、佩戴图生成和人工审核暂停。
 - `src/productv2/workflow_logging.py`：每次工作流运行的中文可读日志组件，负责记录节点输入/输出、状态记忆、异常、关键判断字段、条件分支，以及 LLM / 图片 AI 原始输入输出。
 - `tools/enroute-bestsellers/download.py`：离线下载 Enroute best-selling 参考图库。访问 `collections/<category>/products.json`，默认四类 `earrings`、`bracelets`、`necklaces`、`rings`，按 `sort_by=best-selling` 下载产品图，每类目标约 60 张、最多 70 张。
 - `tests/test_adapters.py`：平台适配器发现和随机选择逻辑测试。
@@ -90,6 +91,13 @@
 - `summary`：LLM 输出的中文摘要，重点说明该风格适合哪类饰品；项链需说明短链、锁骨链、中长链、长链等适配关系。
 - `created_at` / `updated_at`：缓存创建与更新时间。
 
+`enroute_learning_references` 表用于记录可学习的 Enroute `02.jpg` 参考图及学习状态：
+
+- 数据来源：只由下载、删除、同步图片库等明确图片管理动作更新；普通 workflow、控制台统计和 UI 不扫描目录。
+- 统计来源：所有学习数量、未学习数量、学习中、已学习、失败数量都只从 SQLite 查询。
+- 学习状态：`pending`、`learning`、`learned`、`failed`。
+- 删除规则：图片库中删除或不再属于当前规范 `02.jpg` 参考集的记录，会在同步动作中从学习表删除，不使用长期 `missing` 状态参与统计。
+
 `model_profiles` 表用于登记固定虚拟模特：
 
 - `id`：自增主键。
@@ -110,24 +118,24 @@
 
 选中商品后，系统会立刻写入 `locked_at` / `locked_by` 并将 `status` 更新为 `processing`，然后使用数据库整行数据初始化进程内全局 state。后续流程通过 `productv2.state.get_current_product()` 读取当前商品；通过 `set_status()` 和 `set_image()` 更新真实状态或图片字段时，必须同步写回 SQLite。临时流程数据使用 `set_extra()` / `get_extra()`，不要硬加入数据库字段或 `CandidateProduct` 字段。
 
-主图聚合检测：选中商品后调用平台适配器 `get_main_images()` 获取主图 URL，下载可用图片、给子图编号并临时合并保存为 `data/products/<platform>/<product_id>/main_image_collage.jpg`。该合并图只是 LLM 检测用临时产物，不写入 `products.main_image`。合图完成后调用全局 LLM 判断哪些编号子图包含人体参照，可用于判断产品尺寸、比例或佩戴效果。
+主图聚合检测：选中商品后调用平台适配器 `get_main_images()` 获取主图 URL，下载可用图片、给子图编号并临时合并保存为 `data/products/<platform>/<product_id>/main_image_collage.jpg`。该合并图只是 LLM 检测用临时产物，不写入 `products.main_image`。合图完成后调用全局 LLM 做产品合格性检测；当前首个硬规则是必须存在可用于判断产品尺寸、比例或佩戴效果的真人/人体参照图。
 
-LLM 检测成功后会在 state extras 中写入尺寸参考图和产品主图的本地文件路径。随后系统会根据当前处理商品类目，从 `enroute-bestsellers/<category>/` 中严格选择同类目商品的 `02.jpg` 佩戴参考图；如果无法推断类目或同类目没有参考图，则跳过该逆向分析节点，不跨类目兜底。
+产品合格性检测不通过时，当前商品会被标记为 `failed`、释放锁，并回到选品流程选择下一个商品；不会把不合格素材继续交给 AI 生图。当前已实现的失败项是 `size_reference`，后续可以在同一节点的 `qualification_checks` / `failed_checks` 中增加更多质检规则。检测成功后会在 state extras 中写入尺寸参考图和产品主图的本地文件路径。随后系统会根据当前处理商品类目，从 SQLite `enroute_learning_references` 学习表中读取同类目 Enroute `02.jpg` 参考记录；如果无法推断类目或数据库中没有同类目参考记录，则跳过该逆向分析节点，不跨类目兜底。学习规则是：同类目有效缓存少于 5 条时，本轮最多学习 5 张；有效缓存达到 5 条后，本轮学习 1 张。
 
-Enroute 参考图选中后，系统先同步 `data/model_profiles/` 到 SQLite `model_profiles` 表，再按 `enroute_product_id` 查询 `enroute_image_analyses` 缓存。缓存命中且 `analysis_json.selected_model_profile.profile_key` 存在时直接读取；旧缓存缺少模特选择字段时会重新调用逆向 LLM。未命中时调用全局 LLM 对该佩戴图做逆向分析，system prompt 会注入所有固定模特摘要和图片路径，要求 LLM 在 JSON 中输出 `selected_model_profile`。逆向 JSON 按 `summary`、`selected_model_profile`、`model_style`、`clothing_style`、`scene_style` 和 `shooting_style` 多维输出，并写入缓存表。`summary` 由 LLM 自己写，程序不再拼接摘要。逆向分析只提炼模特、衣物、场景和拍摄规则，prompt 禁止输出参考图产品细节。
+Enroute 学习节点只负责按计划串行调用逆向 LLM，并把学习状态写回 `enroute_learning_references`、把逆向结果写入 `enroute_image_analyses` 缓存表；逆向流程本身是全局学习库行为，不把每张图的学习结果数组写入单个 workflow state。固定模特选择已经拆到后续 `select_wearing_style_profile` 节点，学习层不做模特选择。逆向分析只提炼人物摄影、构图、镜头、光线、姿势、背景、发型、妆容和服装等规则，prompt 禁止输出参考图产品细节。
 
 佩戴图生成节点会把已选产品主图和尺寸参考图复制到 `wearing_generation_inputs/`，分别添加底部白条标记 `01 主图` 和 `02 尺寸参考图`，并把 LLM 选中的固定模特三视图图片加入输入图片列表，再根据 Enroute 逆向 JSON 组装图片生成 prompt。prompt 会要求将 `01` 的同一件产品戴在模特脖子上，以 `02` 的佩戴比例为尺寸参考，使用选定固定模特的身份、五官、肤色、体型和三维比例，并强调产品一致性、尺寸一致性和佩戴位置合理。节点会调用慢速图片生成接口并把结果按 attempt 保存为 `data/products/<platform>/<product_id>/wearing_image_attempt_<n>.*`，生成结果路径写入本次 state/metrics，但不写入 `products.wearing_image`。
 
 佩戴图生成后进入 `wait_manual_review` 人工审核节点。该节点使用 LangGraph `interrupt()` 暂停流程，payload 包含商品、生成图、主图、尺寸参考图、Enroute 参考图、模特 profile、prompt 和可选动作。使用 `resume` 传入 `{"action":"approve"}` 继续后续流程，传入 `{"action":"regenerate"}` 返回佩戴图生成节点重新生成，传入 `{"action":"reject"}` 标记当前商品失败并回到选品流程。
 
-所有 workflow 内的 LLM 和图片 AI 调用结果必须写入 LangGraph state 的 `ai_checkpoints`，用于 checkpoint/resume 后复用。当前 key 包括 `detect_size_reference`、`analyze_enroute_reference` 和 `generate_wearing_image_attempt_<n>`。每个 checkpoint 保存 `type`、`source`、`input`、`input_hash`、`status`、`result` 和 `attempt_count`。节点重入时如果输入 hash 一致，必须优先复用 state checkpoint，避免重复调用外部 LLM 或图片 AI；人工 `regenerate` 则使用新的 attempt checkpoint。
+workflow 内的商品级 LLM 和图片 AI 调用结果会写入 LangGraph state 的 `ai_checkpoints`，用于 checkpoint/resume 后复用。当前商品级 key 包括 `detect_size_reference`、`select_wearing_style_profile`、`compile_wearing_generation_prompt` 和 `generate_wearing_image_attempt_<n>`。每个 checkpoint 保存 `type`、`source`、`input`、`input_hash`、`status`、`result` 和 `attempt_count`。节点重入时如果输入 hash 一致，必须优先复用 state checkpoint，避免重复调用外部 LLM 或图片 AI；人工 `regenerate` 则使用新的 attempt checkpoint。Enroute 单图学习是全局学习库行为，不写入单个 workflow state checkpoint，复用和状态以 `enroute_image_analyses` / `enroute_learning_references` 为准。
 
 Grsai 图片生成组件由佩戴图生成节点调用，接口较慢，超时默认按 10 分钟配置。
 
 ## 协作约定
 
 - 使用 `uv add` / `uv remove` 管理依赖，不手写锁文件。
-- 使用 `uv run langgraph dev --allow-blocking` 启动主工作流开发服务，运行 `product_listing` graph。
+- 使用 `uv run langgraph dev --allow-blocking --no-reload` 启动主工作流开发服务，运行 `product_listing` graph。工作流会写入 `workflow-logs/` 和 `data/products/`，不要启用热重载，否则长时间 AI 节点可能被文件变更打断。
 - 使用 `uv run productv2 control-api` 和 `uv run productv2 control-ui` 启动本地控制台。控制台默认连接 `http://127.0.0.1:2024` 的 LangGraph API。
 - 使用 `uv run productv2 init-db --seed-candidates --all` 初始化 SQLite 并导入当前候选商品数据。
 - 使用 `uv run productv2 reset-db` 将现有产品数据恢复为待处理初始状态。

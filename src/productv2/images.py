@@ -5,12 +5,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+import shutil
 
 import httpx
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from productv2.config import DEFAULT_PRODUCT_ASSETS_DIR
 from productv2.models import CandidateProduct
+
+
+IMAGE_DOWNLOAD_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+    ),
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Referer": "https://detail.1688.com/",
+}
 
 
 @dataclass(frozen=True)
@@ -64,9 +75,15 @@ def merge_remote_images_to_numbered_collage(
 ) -> ImageCollageResult:
     """Download images and merge them into a numbered JPEG collage."""
 
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _reset_collage_outputs(output)
+
     images: list[Image.Image] = []
     source_urls: list[str] = []
-    for url in image_urls[:max_images]:
+    for url in image_urls:
+        if len(images) >= max_images:
+            break
         image = _download_image(url, timeout=timeout)
         if image is not None:
             images.append(image)
@@ -75,8 +92,6 @@ def merge_remote_images_to_numbered_collage(
     if not images:
         raise ValueError("No downloadable images available for collage.")
 
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
     numbered_source_paths = _save_numbered_source_images(images, output.parent)
     collage = build_image_collage(
         images,
@@ -156,9 +171,29 @@ def _save_numbered_source_images(images: list[Image.Image], output_dir: Path) ->
     return paths
 
 
+def _reset_collage_outputs(output_path: Path) -> None:
+    if output_path.exists():
+        if output_path.is_dir():
+            shutil.rmtree(output_path)
+        else:
+            output_path.unlink()
+
+    source_dir = output_path.parent / "main_image_sources"
+    if source_dir.exists():
+        if source_dir.is_dir():
+            shutil.rmtree(source_dir)
+        else:
+            source_dir.unlink()
+
+
 def _download_image(url: str, timeout: float) -> Image.Image | None:
     try:
-        response = httpx.get(url, timeout=timeout, follow_redirects=True)
+        response = httpx.get(
+            url,
+            timeout=timeout,
+            follow_redirects=True,
+            headers=IMAGE_DOWNLOAD_HEADERS,
+        )
         response.raise_for_status()
         return Image.open(BytesIO(response.content)).copy()
     except Exception:  # noqa: BLE001

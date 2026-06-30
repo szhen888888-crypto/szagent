@@ -13,6 +13,11 @@ from typing import Any, Iterable
 import httpx
 from PIL import Image, ImageOps
 
+from productv2.config import Settings
+from productv2.db import init_database
+from productv2.enroute import list_category_wearing_references
+from productv2.enroute_learning import sync_enroute_learning_library
+
 
 BASE_URL = "https://enroutejewelry.com/collections/{category}/products.json"
 DEFAULT_CATEGORIES = ("earrings", "bracelets", "necklaces", "rings")
@@ -21,6 +26,10 @@ DEFAULT_PAGE_SIZE = 20
 DEFAULT_MIN_IMAGES_PER_CATEGORY = 50
 DEFAULT_TARGET_IMAGES_PER_CATEGORY = 60
 DEFAULT_MAX_IMAGES_PER_CATEGORY = 70
+DEFAULT_MIN_PRODUCTS_PER_CATEGORY = 70
+DEFAULT_TARGET_PRODUCTS_PER_CATEGORY = 80
+DEFAULT_MAX_PRODUCTS_PER_CATEGORY = 100
+DEFAULT_REFERENCE_IMAGE_POSITION = 2
 DEFAULT_TIMEOUT = 30.0
 SORT_BY = "best-selling"
 
@@ -70,6 +79,44 @@ def parse_args() -> argparse.Namespace:
         help="Hard upper bound for images per category.",
     )
     parser.add_argument(
+        "--min-products-per-category",
+        type=int,
+        default=None,
+        help=(
+            "Preferred lower bound for saved products per category. "
+            "Supplying any product-count option switches stopping logic to products."
+        ),
+    )
+    parser.add_argument(
+        "--target-products-per-category",
+        type=int,
+        default=None,
+        help=(
+            "Target saved products per category. Defaults to 80 when product-count "
+            "mode is enabled."
+        ),
+    )
+    parser.add_argument(
+        "--max-products-per-category",
+        type=int,
+        default=None,
+        help=(
+            "Hard upper bound for saved products per category. Defaults to 100 when "
+            "product-count mode is enabled."
+        ),
+    )
+    parser.add_argument(
+        "--reference-only",
+        action="store_true",
+        help="Download only the reference image for each product and save it as 02.jpg.",
+    )
+    parser.add_argument(
+        "--reference-image-position",
+        type=int,
+        default=DEFAULT_REFERENCE_IMAGE_POSITION,
+        help="1-based product image position used by --reference-only.",
+    )
+    parser.add_argument(
         "--page-size",
         type=int,
         default=DEFAULT_PAGE_SIZE,
@@ -86,6 +133,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Re-download images even when local files already exist.",
     )
+    parser.add_argument(
+        "--database-path",
+        type=Path,
+        default=None,
+        help="SQLite database path used to sync the Enroute learning reference table.",
+    )
+    parser.add_argument(
+        "--no-sync-database",
+        action="store_true",
+        help="Download files only; do not update the learning reference table.",
+    )
     return parser.parse_args()
 
 
@@ -96,6 +154,13 @@ def main() -> None:
         args.target_images_per_category,
         args.max_images_per_category,
     )
+    product_bounds = resolve_product_bounds(
+        reference_only=args.reference_only,
+        min_products=args.min_products_per_category,
+        target_products=args.target_products_per_category,
+        max_products=args.max_products_per_category,
+    )
+    validate_reference_image_position(args.reference_image_position)
 
     with httpx.Client(
         timeout=args.timeout,
@@ -110,11 +175,30 @@ def main() -> None:
                 min_images_per_category=args.min_images_per_category,
                 target_images_per_category=args.target_images_per_category,
                 max_images_per_category=args.max_images_per_category,
+                min_products_per_category=product_bounds[0],
+                target_products_per_category=product_bounds[1],
+                max_products_per_category=product_bounds[2],
+                reference_only=args.reference_only,
+                reference_image_position=args.reference_image_position,
                 page_size=args.page_size,
                 force=args.force,
             )
             for category in args.categories
         ]
+
+    if not args.no_sync_database:
+        database_path = args.database_path or Settings().productv2_database_path
+        init_database(database_path)
+        for summary in summaries:
+            references = list_category_wearing_references(
+                Path(summary.output_dir).parent,
+                summary.category,
+            )
+            sync_enroute_learning_library(
+                database_path,
+                references,
+                category=summary.category,
+            )
 
     print(json.dumps([asdict(summary) for summary in summaries], indent=2))
 
@@ -128,6 +212,61 @@ def validate_image_bounds(min_images: int, target_images: int, max_images: int) 
         raise ValueError("max-images-per-category must be >= target-images-per-category")
 
 
+def resolve_product_bounds(
+    *,
+    reference_only: bool,
+    min_products: int | None,
+    target_products: int | None,
+    max_products: int | None,
+) -> tuple[int | None, int | None, int | None]:
+    product_mode = reference_only or any(
+        value is not None for value in (min_products, target_products, max_products)
+    )
+    if not product_mode:
+        return None, None, None
+
+    resolved_max = (
+        max_products
+        if max_products is not None
+        else DEFAULT_MAX_PRODUCTS_PER_CATEGORY
+    )
+    default_target = min(DEFAULT_TARGET_PRODUCTS_PER_CATEGORY, resolved_max)
+    resolved_target = (
+        target_products
+        if target_products is not None
+        else max(min_products or 1, default_target)
+    )
+    resolved_min = (
+        min_products
+        if min_products is not None
+        else min(DEFAULT_MIN_PRODUCTS_PER_CATEGORY, resolved_target)
+    )
+    validate_product_bounds(resolved_min, resolved_target, resolved_max)
+    return resolved_min, resolved_target, resolved_max
+
+
+def validate_product_bounds(
+    min_products: int,
+    target_products: int,
+    max_products: int,
+) -> None:
+    if min_products < 1:
+        raise ValueError("min-products-per-category must be positive")
+    if target_products < min_products:
+        raise ValueError(
+            "target-products-per-category must be >= min-products-per-category"
+        )
+    if max_products < target_products:
+        raise ValueError(
+            "max-products-per-category must be >= target-products-per-category"
+        )
+
+
+def validate_reference_image_position(position: int) -> None:
+    if position < 1:
+        raise ValueError("reference-image-position must be positive")
+
+
 def download_category(
     client: httpx.Client,
     category: str,
@@ -135,6 +274,11 @@ def download_category(
     min_images_per_category: int = DEFAULT_MIN_IMAGES_PER_CATEGORY,
     target_images_per_category: int = DEFAULT_TARGET_IMAGES_PER_CATEGORY,
     max_images_per_category: int = DEFAULT_MAX_IMAGES_PER_CATEGORY,
+    min_products_per_category: int | None = None,
+    target_products_per_category: int | None = None,
+    max_products_per_category: int | None = None,
+    reference_only: bool = False,
+    reference_image_position: int = DEFAULT_REFERENCE_IMAGE_POSITION,
     page_size: int = DEFAULT_PAGE_SIZE,
     force: bool = False,
 ) -> CategorySummary:
@@ -145,6 +289,24 @@ def download_category(
         target_images_per_category,
         max_images_per_category,
     )
+    if reference_only or any(
+        value is not None
+        for value in (
+            min_products_per_category,
+            target_products_per_category,
+            max_products_per_category,
+        )
+    ):
+        product_bounds = resolve_product_bounds(
+            reference_only=True,
+            min_products=min_products_per_category,
+            target_products=target_products_per_category,
+            max_products=max_products_per_category,
+        )
+        min_products_per_category = product_bounds[0]
+        target_products_per_category = product_bounds[1]
+        max_products_per_category = product_bounds[2]
+    validate_reference_image_position(reference_image_position)
 
     category_output_dir = output_dir / category
     category_output_dir.mkdir(parents=True, exist_ok=True)
@@ -152,13 +314,21 @@ def download_category(
     skipped_images = 0
     products_seen = 0
     products_saved = 0
+    product_count_mode = target_products_per_category is not None
 
     for product in iter_best_selling_products(client, category, page_size=page_size):
         products_seen += 1
-        images = product_images(product)
+        images = product_images_for_download(
+            product,
+            reference_only=reference_only,
+            reference_image_position=reference_image_position,
+        )
         if not images:
             continue
-        if (
+        if product_count_mode and max_products_per_category is not None:
+            if products_saved >= max_products_per_category:
+                break
+        if (not product_count_mode) and (
             downloaded_images >= min_images_per_category
             and downloaded_images + len(images) > max_images_per_category
         ):
@@ -169,8 +339,8 @@ def download_category(
         product_downloads: list[dict[str, Any]] = []
         product_skipped = 0
 
-        for image_index, image in enumerate(images, start=1):
-            if downloaded_images >= max_images_per_category:
+        for image_index, image in images:
+            if (not product_count_mode) and downloaded_images >= max_images_per_category:
                 product_skipped += 1
                 skipped_images += 1
                 continue
@@ -220,9 +390,20 @@ def download_category(
             images=product_downloads,
             skipped_images=product_skipped,
         )
-        products_saved += 1
+        product_has_saved_image = any(
+            item.get("status") in {"downloaded", "exists"}
+            for item in product_downloads
+        )
+        if product_count_mode:
+            if product_has_saved_image:
+                products_saved += 1
+        else:
+            products_saved += 1
 
-        if downloaded_images >= target_images_per_category:
+        if product_count_mode:
+            if products_saved >= target_products_per_category:
+                break
+        elif downloaded_images >= target_images_per_category:
             break
 
     return CategorySummary(
@@ -281,6 +462,20 @@ def product_images(product: dict[str, Any]) -> list[dict[str, Any]]:
         for image in sorted(images, key=lambda item: item.get("position") or 0)
         if isinstance(image, dict)
     ]
+
+
+def product_images_for_download(
+    product: dict[str, Any],
+    *,
+    reference_only: bool = False,
+    reference_image_position: int = DEFAULT_REFERENCE_IMAGE_POSITION,
+) -> list[tuple[int, dict[str, Any]]]:
+    images = product_images(product)
+    if not reference_only:
+        return list(enumerate(images, start=1))
+    if len(images) < reference_image_position:
+        return []
+    return [(reference_image_position, images[reference_image_position - 1])]
 
 
 def product_dir_name(product_index: int, product: dict[str, Any]) -> str:

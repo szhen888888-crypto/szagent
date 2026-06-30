@@ -28,12 +28,20 @@ class EmptyLLMResponseError(RuntimeError):
     """Raised when the streaming LLM endpoint returns no text."""
 
 
-class SizeReferenceDetection(BaseModel):
+class ProductQualificationDetection(BaseModel):
+    """Product qualification check result from the main-image collage."""
+
+    is_product_qualified: bool = True
+    qualification_checks: dict[str, Any] = Field(default_factory=dict)
+    failed_checks: list[str] = Field(default_factory=list)
     can_judge_size: bool = False
     image_numbers: list[int] = Field(default_factory=list)
     size_reference_image_number: int | None = None
     main_image_number: int | None = None
     reason: str = ""
+
+
+SizeReferenceDetection = ProductQualificationDetection
 
 
 SIZE_REFERENCE_PROMPT_DIR = "vision/size_reference"
@@ -49,8 +57,8 @@ def detect_size_reference_images(
     model: Any | None = None,
     logger: WorkflowRunLogger | None = None,
     database_path: str | Path | None = None,
-) -> SizeReferenceDetection:
-    """Use OpenAI Responses streaming to detect images with human size reference."""
+) -> ProductQualificationDetection:
+    """Use OpenAI Responses streaming to qualify product image inputs."""
 
     path = Path(collage_path)
     if model is not None:
@@ -224,8 +232,18 @@ def request_responses_stream_parsed(
     logger: WorkflowRunLogger | None = None,
     request_context: str = "responses_stream",
     database_path: str | Path | None = None,
+    use_ai_call_lock: bool = True,
 ) -> T:
     """Call Responses streaming and retry empty or unparsable model output."""
+
+    if not use_ai_call_lock:
+        return _request_responses_stream_parsed_unlocked(
+            settings,
+            payload,
+            parser,
+            logger=logger,
+            request_context=request_context,
+        )
 
     return run_with_ai_call_lock(
         database_path=database_path or settings.productv2_database_path,
@@ -356,7 +374,7 @@ def collect_responses_stream_text(stream: Iterable[str | bytes]) -> str:
 
 def parse_size_reference_detection(text: str) -> SizeReferenceDetection:
     payload = _extract_json_object(text)
-    detection = SizeReferenceDetection.model_validate(payload)
+    detection = ProductQualificationDetection.model_validate(payload)
     detection.image_numbers = sorted(
         {number for number in detection.image_numbers if number > 0}
     )
@@ -369,6 +387,26 @@ def parse_size_reference_detection(text: str) -> SizeReferenceDetection:
     detection.can_judge_size = bool(detection.image_numbers) and detection.can_judge_size
     if not detection.can_judge_size:
         detection.size_reference_image_number = None
+    checks = dict(detection.qualification_checks or {})
+    checks.setdefault(
+        "size_reference",
+        {
+            "passed": detection.can_judge_size,
+            "image_numbers": detection.image_numbers,
+            "size_reference_image_number": detection.size_reference_image_number,
+            "reason": detection.reason,
+        },
+    )
+    failed_checks = list(dict.fromkeys(str(item) for item in detection.failed_checks))
+    if not detection.can_judge_size and "size_reference" not in failed_checks:
+        failed_checks.append("size_reference")
+    detection.qualification_checks = checks
+    detection.failed_checks = failed_checks
+    detection.is_product_qualified = (
+        bool(detection.is_product_qualified)
+        and detection.can_judge_size
+        and not failed_checks
+    )
     return detection
 
 

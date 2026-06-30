@@ -8,8 +8,10 @@ from productv2.db import (
     acquire_ai_call_lock,
     get_ai_call_lock,
     get_enroute_image_analysis,
+    get_enroute_learning_reference,
     import_raw_data_directory,
     init_database,
+    list_enroute_learning_references,
     load_model_profiles,
     load_products_from_database,
     load_unfinished_products_from_database,
@@ -18,7 +20,9 @@ from productv2.db import (
     seed_candidate_products,
     sync_default_model_profiles,
     update_ai_call_lock_result,
+    update_enroute_learning_reference_status,
     upsert_enroute_image_analysis,
+    upsert_enroute_learning_reference,
     upsert_model_profile,
 )
 
@@ -125,6 +129,26 @@ def test_init_database_creates_enroute_image_analysis_cache(tmp_path) -> None:
     assert columns["enroute_category"]["notnull"] == 1
     assert columns["analysis_json"]["notnull"] == 1
     assert columns["summary"]["notnull"] == 1
+
+
+def test_init_database_creates_enroute_learning_reference_table(tmp_path) -> None:
+    database_path = tmp_path / "productv2.db"
+
+    init_database(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        columns = {
+            row["name"]: row
+            for row in connection.execute(
+                "PRAGMA table_info(enroute_learning_references)"
+            ).fetchall()
+        }
+
+    assert columns["enroute_product_id"]["notnull"] == 1
+    assert columns["enroute_category"]["notnull"] == 1
+    assert columns["image_path"]["notnull"] == 1
+    assert columns["status"]["dflt_value"] == "'pending'"
 
 
 def test_init_database_creates_model_profiles_table(tmp_path) -> None:
@@ -310,6 +334,74 @@ def test_upsert_enroute_image_analysis_caches_by_unique_product(tmp_path) -> Non
         ).fetchone()[0]
 
     assert count == 1
+
+
+def test_upsert_enroute_image_analysis_syncs_learning_reference_status(tmp_path) -> None:
+    database_path = tmp_path / "productv2.db"
+    upsert_enroute_learning_reference(
+        database_path,
+        enroute_product_id="necklaces:demo",
+        enroute_category="necklaces",
+        enroute_title="Demo",
+        enroute_handle="demo",
+        product_dir="/tmp/demo",
+        image_path="/tmp/demo/02.jpg",
+    )
+
+    cached = upsert_enroute_image_analysis(
+        database_path,
+        enroute_product_id="necklaces:demo",
+        enroute_category="necklaces",
+        image_path="/tmp/demo/02.jpg",
+        analysis_json={"is_valid_human_reference": True},
+        summary="有效缓存",
+    )
+
+    row = get_enroute_learning_reference(database_path, "necklaces:demo")
+    assert row is not None
+    assert row["status"] == "learned"
+    assert row["analysis_id"] == cached["id"]
+
+
+def test_enroute_learning_reference_status_lifecycle(tmp_path) -> None:
+    database_path = tmp_path / "productv2.db"
+
+    inserted = upsert_enroute_learning_reference(
+        database_path,
+        enroute_product_id="necklaces:demo",
+        enroute_category="necklaces",
+        enroute_title="Demo",
+        enroute_handle="demo",
+        product_dir="/tmp/demo",
+        image_path="/tmp/demo/02.jpg",
+        source_url="https://example.test/demo",
+        metadata={"handle": "demo"},
+    )
+
+    assert inserted["status"] == "pending"
+    assert inserted["metadata"]["handle"] == "demo"
+
+    learning = update_enroute_learning_reference_status(
+        database_path,
+        enroute_product_id="necklaces:demo",
+        status="learning",
+        last_workflow_log_path="/tmp/workflow.log",
+    )
+    failed = update_enroute_learning_reference_status(
+        database_path,
+        enroute_product_id="necklaces:demo",
+        status="failed",
+        last_error="timeout",
+        increment_attempts=True,
+    )
+
+    assert learning["last_workflow_log_path"] == "/tmp/workflow.log"
+    assert failed["status"] == "failed"
+    assert failed["learning_attempts"] == 1
+    assert get_enroute_learning_reference(database_path, "necklaces:demo")[
+        "last_error"
+    ] == "timeout"
+    assert len(list_enroute_learning_references(database_path, "necklaces")) == 1
 
 
 def test_seed_candidate_products_upserts_candidate_data(tmp_path) -> None:

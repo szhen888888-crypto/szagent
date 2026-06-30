@@ -7,6 +7,18 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+REVIEW_ACTION_APPROVE = "approve"
+REVIEW_ACTION_REGENERATE = "regenerate"
+REVIEW_ACTION_RECOMPILE_PROMPT = "recompile_prompt"
+REVIEW_ACTION_REJECT = "reject"
+MANUAL_REVIEW_ACTIONS = (
+    REVIEW_ACTION_APPROVE,
+    REVIEW_ACTION_REGENERATE,
+    REVIEW_ACTION_RECOMPILE_PROMPT,
+    REVIEW_ACTION_REJECT,
+)
+
+
 class WearingImageReviewRequest(BaseModel):
     """Canonical workflow payload for one wearing-image manual review step."""
 
@@ -20,9 +32,7 @@ class WearingImageReviewRequest(BaseModel):
     selected_model_profile: dict[str, Any] = Field(default_factory=dict)
     prompt: str = ""
     attempt: int = 1
-    options: list[str] = Field(
-        default_factory=lambda: ["approve", "regenerate", "reject"]
-    )
+    options: list[str] = Field(default_factory=lambda: list(MANUAL_REVIEW_ACTIONS))
 
 
 class ManualReviewDecision(BaseModel):

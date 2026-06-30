@@ -4,11 +4,14 @@ import { cn } from "../../lib/utils";
 type ButtonVariant = "default" | "secondary" | "outline" | "destructive" | "ghost";
 
 const variants: Record<ButtonVariant, string> = {
-  default: "bg-zinc-950 text-white hover:bg-zinc-800",
-  secondary: "bg-zinc-100 text-zinc-950 hover:bg-zinc-200",
-  outline: "border border-zinc-200 bg-white text-zinc-950 hover:bg-zinc-50",
-  destructive: "bg-red-600 text-white hover:bg-red-700",
-  ghost: "text-zinc-700 hover:bg-zinc-100",
+  default:
+    "bg-gradient-to-b from-brand-500 to-brand-600 text-white shadow-brand-600/25 hover:from-brand-500 hover:to-brand-700",
+  secondary: "bg-zinc-100 text-zinc-900 hover:bg-zinc-200",
+  outline:
+    "border border-zinc-200 bg-white text-zinc-800 hover:border-zinc-300 hover:bg-zinc-50 hover:text-zinc-950",
+  destructive:
+    "bg-gradient-to-b from-red-500 to-red-600 text-white shadow-red-600/25 hover:from-red-500 hover:to-red-700",
+  ghost: "text-zinc-600 shadow-none hover:bg-zinc-100 hover:text-zinc-900",
 };
 
 export function Button({
@@ -31,10 +34,10 @@ export function Button({
       disabled={disabled || loading}
       aria-busy={loading || undefined}
       className={cn(
-        "inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 text-sm font-medium shadow-sm transition-all duration-150",
-        "hover:-translate-y-px active:translate-y-0 active:scale-[0.98]",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 focus-visible:ring-offset-2",
-        "disabled:cursor-not-allowed disabled:opacity-55 disabled:shadow-none disabled:hover:translate-y-0 disabled:active:scale-100",
+        "inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-lg px-3.5 text-sm font-medium shadow-sm transition-all duration-150",
+        "hover:-translate-y-px hover:shadow-md active:translate-y-0 active:scale-[0.98] active:shadow-sm",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 focus-visible:ring-offset-2",
+        "disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none disabled:hover:translate-y-0 disabled:hover:shadow-none disabled:active:scale-100",
         variants[variant],
         className,
       )}

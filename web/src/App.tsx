@@ -10,15 +10,26 @@ import {
 import {
   BookOpenCheck,
   Activity,
+  AlertCircle,
+  Check,
+  CheckCircle2,
+  Clock,
+  Copy,
+  Cpu,
   ExternalLink,
   FileText,
   GalleryHorizontalEnd,
+  Image as ImageIcon,
   Images,
+  Maximize2,
+  Minus,
+  Loader2,
   PauseCircle,
   Play,
   Power,
   RefreshCcw,
   RotateCcw,
+  Sparkles,
   Square,
   Trash2,
 } from "lucide-react";
@@ -26,6 +37,7 @@ import Zoom from "react-medium-image-zoom";
 import {
   clearEnrouteLearning,
   clearWorkflowFlows,
+  deleteWorkflowFlow,
   getServerStatus,
   getThreadState,
   listEnrouteLearning,
@@ -44,10 +56,13 @@ import {
   restartServer,
   restartWorkflow,
   resumeThread,
+  retryWorkflowNode,
   ServerStatus,
   startServer,
   startWorkflow,
+  stopWorkflowFlow,
   stopServer,
+  AiCallSummary,
   ThreadStateResponse,
   ThreadsResponse,
   ThreadProgress,
@@ -57,6 +72,7 @@ import {
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
+import { Dialog } from "./components/ui/dialog";
 import { Input } from "./components/ui/input";
 import { Textarea } from "./components/ui/textarea";
 
@@ -70,10 +86,14 @@ type ActionKey =
   | "server-restart"
   | "workflow-start"
   | "workflow-restart"
+  | "retry-compile-prompt"
   | "clear-flows"
+  | "flow-stop"
+  | "flow-delete"
   | "clear-enroute"
   | "resume-approve"
   | "resume-regenerate"
+  | "resume-recompile-prompt"
   | "resume-reject"
   | "resume-custom";
 
@@ -97,6 +117,7 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
   const [activeAction, setActiveAction] = useState<ActionKey | null>(null);
+  const [activeThreadActionId, setActiveThreadActionId] = useState("");
   const selectedThreadIdRef = useRef(selectedThreadId);
 
   const selectedThread = useMemo(
@@ -230,9 +251,14 @@ export default function App() {
   async function runAction(
     action: () => Promise<Record<string, unknown>>,
     actionKey: ActionKey,
-    options: { refreshTasks?: boolean; clearThreadSelection?: boolean } = {},
+    options: {
+      refreshTasks?: boolean;
+      clearThreadSelection?: boolean;
+      activeThreadId?: string;
+    } = {},
   ) {
     setActiveAction(actionKey);
+    setActiveThreadActionId(options.activeThreadId ?? "");
     setLoading(true);
     setError("");
     setNotice("");
@@ -266,6 +292,7 @@ export default function App() {
     } finally {
       setLoading(false);
       setActiveAction(null);
+      setActiveThreadActionId("");
     }
   }
 
@@ -297,14 +324,21 @@ export default function App() {
   }, [threads, selectedThreadId, apiUrl, assistantId]);
 
   return (
-    <main className="min-h-screen bg-zinc-50 text-zinc-950">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-4 py-4">
-        <header className="flex flex-col gap-3 border-b border-zinc-200 pb-4 md:flex-row md:items-end md:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-normal">Productv2 控制台</h1>
-            <p className="mt-1 text-sm text-zinc-500">
-              本地 LangGraph 服务、任务状态和 resume 控制。
-            </p>
+    <main className="min-h-screen text-zinc-950">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-6">
+        <header className="flex flex-col gap-4 rounded-2xl border border-zinc-200/70 bg-white/70 p-5 shadow-[0_1px_2px_rgba(24,24,27,0.04),0_12px_32px_-16px_rgba(24,24,27,0.16)] backdrop-blur md:flex-row md:items-center md:justify-between">
+          <div className="flex items-center gap-3.5">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white shadow-lg shadow-brand-600/30">
+              <Sparkles className="h-5 w-5" />
+            </div>
+            <div>
+              <h1 className="bg-gradient-to-r from-zinc-900 to-zinc-600 bg-clip-text text-2xl font-semibold tracking-tight text-transparent">
+                Productv2 控制台
+              </h1>
+              <p className="mt-0.5 text-sm text-zinc-500">
+                本地 LangGraph 服务、任务状态和 resume 控制。
+              </p>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <PageNav page={page} onChange={setPage} />
@@ -339,8 +373,8 @@ export default function App() {
           </div>
         </header>
 
-        {error ? <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div> : null}
-        {notice ? <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">{notice}</div> : null}
+        {error ? <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50/80 p-3.5 text-sm text-red-700 shadow-sm"><span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-red-500" />{error}</div> : null}
+        {notice ? <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50/80 p-3.5 text-sm text-amber-800 shadow-sm"><span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-amber-500" />{notice}</div> : null}
 
         {page === "tasks" ? (
           <section className="grid gap-4 lg:grid-cols-[360px_1fr]">
@@ -394,7 +428,27 @@ export default function App() {
               <ThreadList
                 threads={threads?.threads ?? []}
                 selectedThreadId={selectedThreadId}
+                loading={loading}
+                activeAction={activeAction}
+                activeThreadActionId={activeThreadActionId}
                 onSelect={setSelectedThreadId}
+                onStop={(threadId) =>
+                  runAction(
+                    () => stopWorkflowFlow(apiUrl, threadId),
+                    "flow-stop",
+                    { activeThreadId: threadId },
+                  )
+                }
+                onDelete={(threadId) =>
+                  runAction(
+                    () => deleteWorkflowFlow(apiUrl, assistantId, threadId),
+                    "flow-delete",
+                    {
+                      activeThreadId: threadId,
+                      clearThreadSelection: threadId === selectedThreadId,
+                    },
+                  )
+                }
               />
             </div>
 
@@ -402,6 +456,7 @@ export default function App() {
               <ThreadDetail
                 thread={selectedThread}
                 state={threadState}
+                learning={enrouteLearning}
                 resumeJson={resumeJson}
                 setResumeJson={setResumeJson}
                 loading={loading}
@@ -416,6 +471,12 @@ export default function App() {
                         payload,
                       ),
                     actionKey,
+                  )
+                }
+                onRetryNode={(node) =>
+                  runAction(
+                    () => retryWorkflowNode(apiUrl, assistantId, selectedThreadId, node),
+                    "retry-compile-prompt",
                   )
                 }
                 onOpenStudio={() => selectedThread?.studio_url && window.open(selectedThread.studio_url, "_blank")}
@@ -461,7 +522,7 @@ function PageNav({
   onChange: (page: PageId) => void;
 }) {
   return (
-    <nav className="flex rounded-md border border-zinc-200 bg-white p-1">
+    <nav className="flex gap-0.5 rounded-xl border border-zinc-200 bg-zinc-50/80 p-1 shadow-sm">
       <Button
         className="h-8 px-2"
         variant={page === "tasks" ? "default" : "ghost"}
@@ -617,11 +678,21 @@ function WorkflowPanel({
 function ThreadList({
   threads,
   selectedThreadId,
+  loading,
+  activeAction,
+  activeThreadActionId,
   onSelect,
+  onStop,
+  onDelete,
 }: {
   threads: WorkflowThread[];
   selectedThreadId: string;
+  loading: boolean;
+  activeAction: ActionKey | null;
+  activeThreadActionId: string;
   onSelect: (threadId: string) => void;
+  onStop: (threadId: string) => void;
+  onDelete: (threadId: string) => void;
 }) {
   return (
     <Card>
@@ -632,44 +703,80 @@ function ThreadList({
         {threads.length === 0 ? (
           <p className="text-sm text-zinc-500">暂无任务。</p>
         ) : (
-          threads.map((thread) => (
-            <div
-              key={thread.thread_id}
-              className={`w-full select-text rounded-md border p-3 text-left transition-colors ${
-                selectedThreadId === thread.thread_id
-                  ? "border-zinc-950 bg-zinc-50"
-                  : "border-zinc-200 bg-white hover:bg-zinc-50"
-              }`}
-            >
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="truncate font-mono text-xs">{thread.thread_id}</span>
-                <div className="flex shrink-0 items-center gap-2">
-                  <ThreadStopReasonBadge thread={thread} />
+          threads.map((thread) => {
+            const isSelected = selectedThreadId === thread.thread_id;
+            const canStop =
+              thread.status === "busy" ||
+              Boolean(thread.progress?.running) ||
+              thread.progress?.status === "running";
+            const isActiveThreadAction = activeThreadActionId === thread.thread_id;
+            return (
+              <div
+                key={thread.thread_id}
+                className={`w-full select-text rounded-lg border p-3 text-left transition-all ${
+                  isSelected
+                    ? "border-brand-300 bg-brand-50/60 shadow-sm ring-1 ring-brand-200"
+                    : "border-zinc-200 bg-white hover:border-zinc-300 hover:bg-zinc-50"
+                }`}
+              >
+                <div className="mb-2 flex min-w-0 items-start justify-between gap-2">
+                  <span className="min-w-0 truncate font-mono text-xs">
+                    {thread.thread_id}
+                  </span>
+                  <div className="shrink-0">
+                    <ThreadStopReasonBadge thread={thread} />
+                  </div>
+                </div>
+                <div className="mb-2 grid grid-cols-3 gap-1.5 sm:flex sm:flex-wrap">
                   <Button
-                    className="h-7 px-2 text-xs"
-                    variant={selectedThreadId === thread.thread_id ? "default" : "outline"}
+                    className="h-7 w-full px-2 text-xs sm:w-auto"
+                    variant={isSelected ? "default" : "outline"}
                     onClick={() => onSelect(thread.thread_id)}
                   >
                     查看
                   </Button>
+                  <Button
+                    className="h-7 w-full px-2 text-xs sm:w-auto"
+                    variant="outline"
+                    title={canStop ? "停止当前 flow 的活跃 run" : "当前没有活跃 run"}
+                    disabled={loading || !canStop}
+                    loading={activeAction === "flow-stop" && isActiveThreadAction}
+                    loadingText="停止中"
+                    onClick={() => onStop(thread.thread_id)}
+                  >
+                    <Square className="h-3.5 w-3.5" />
+                    停止
+                  </Button>
+                  <Button
+                    className="h-7 w-full px-2 text-xs sm:w-auto"
+                    variant="destructive"
+                    title="删除该 flow，并恢复已锁定商品"
+                    disabled={loading}
+                    loading={activeAction === "flow-delete" && isActiveThreadAction}
+                    loadingText="删除中"
+                    onClick={() => onDelete(thread.thread_id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    删除
+                  </Button>
+                </div>
+                <p className="truncate text-sm text-zinc-700">
+                  {thread.summary.product_title || thread.summary.product_id || "未选择产品"}
+                </p>
+                <div className="mt-2 grid gap-1 text-xs text-zinc-500">
+                  <p className="truncate">运行状态：{threadStatusLabel(thread.status)}</p>
+                  <p className="truncate">
+                    运行进度：{thread.progress?.message || thread.progress?.phase_label || "-"}
+                  </p>
+                  <p className="truncate">当前节点：{thread.summary.current_node_label || "-"}</p>
+                  {thread.progress?.elapsed_label ? (
+                    <p className="truncate">已运行：{thread.progress.elapsed_label}</p>
+                  ) : null}
+                  <p className="truncate">停止原因：{thread.summary.stop_reason || "-"}</p>
                 </div>
               </div>
-              <p className="truncate text-sm text-zinc-700">
-                {thread.summary.product_title || thread.summary.product_id || "未选择产品"}
-              </p>
-              <div className="mt-2 grid gap-1 text-xs text-zinc-500">
-                <p className="truncate">运行状态：{threadStatusLabel(thread.status)}</p>
-                <p className="truncate">
-                  运行进度：{thread.progress?.message || thread.progress?.phase_label || "-"}
-                </p>
-                <p className="truncate">当前节点：{thread.summary.current_node_label || "-"}</p>
-                {thread.progress?.elapsed_label ? (
-                  <p className="truncate">已运行：{thread.progress.elapsed_label}</p>
-                ) : null}
-                <p className="truncate">停止原因：{thread.summary.stop_reason || "-"}</p>
-              </div>
-            </div>
-          ))
+            );
+          })
         )}
       </CardContent>
     </Card>
@@ -732,10 +839,10 @@ function ModelProfilesPage({ profiles }: { profiles: ModelProfile[] }) {
                       role="tab"
                       aria-selected={active}
                       onClick={() => setSelectedKey(profile.profile_key)}
-                      className={`min-w-[220px] rounded-md border p-3 text-left shadow-sm transition-all duration-150 lg:min-w-0 ${
+                      className={`min-w-[220px] rounded-lg border p-3 text-left shadow-sm transition-all duration-150 lg:min-w-0 ${
                         active
-                          ? "border-zinc-950 bg-zinc-950 text-white"
-                          : "border-zinc-200 bg-white text-zinc-950 hover:-translate-y-px hover:bg-zinc-50"
+                          ? "border-brand-600 bg-gradient-to-br from-brand-500 to-brand-700 text-white shadow-md shadow-brand-600/25"
+                          : "border-zinc-200 bg-white text-zinc-950 hover:-translate-y-px hover:border-zinc-300 hover:bg-zinc-50"
                       }`}
                     >
                       <div className="flex items-start justify-between gap-2">
@@ -876,24 +983,33 @@ function EnrouteLearningPage({
   activeAction: ActionKey | null;
 }) {
   const [category, setCategory] = useState("all");
+  const [status, setStatus] = useState("all");
   const items = learning?.items ?? [];
   const categories = learning?.categories ?? [];
-  const visibleItems =
-    category === "all"
-      ? items
-      : items.filter((item) => item.enroute_category === category);
+  const statuses = learning?.statuses ?? [];
+  const visibleItems = items
+    .filter((item) => category === "all" || item.enroute_category === category)
+    .filter((item) => status === "all" || item.status === status)
+    .sort(compareLearningItems);
+  const statusOptions = [
+    { status: "all", label: "全部", count: learning?.total ?? 0 },
+    { status: "pending", label: "待学习", count: countByStatus(statuses, "pending") },
+    { status: "learning", label: "学习中", count: countByStatus(statuses, "learning") },
+    { status: "learned", label: "已学习", count: countByStatus(statuses, "learned") },
+    { status: "failed", label: "失败", count: countByStatus(statuses, "failed") },
+  ];
 
   return (
     <section className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h2 className="text-xl font-semibold tracking-normal">Enroute 学习结果</h2>
+          <h2 className="text-xl font-semibold tracking-normal">Enroute 学习库</h2>
           <p className="mt-1 text-sm text-zinc-500">
-            已缓存的 Enroute 佩戴参考逆向分析，用于后续商品匹配和模特选择。
+            本地 Enroute 参考图、学习状态和已缓存逆向分析，用于后续商品匹配和模特选择。
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="secondary">{learning?.total ?? 0} 条学习数据</Badge>
+          <Badge variant="secondary">{learning?.total ?? 0} 张参考图</Badge>
           <Button
             variant="destructive"
             onClick={onClear}
@@ -902,36 +1018,51 @@ function EnrouteLearningPage({
             loadingText="清理中"
           >
             <RotateCcw className="h-4 w-4" />
-            清理逆向数据
+            清理学习库
           </Button>
         </div>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-4">
-        <InfoBlock label="总数" value={learning?.total ?? 0} />
-        <InfoBlock label="类目数" value={categories.length} />
-        <InfoBlock label="当前筛选" value={category === "all" ? "全部" : category} />
-        <InfoBlock label="展示数量" value={visibleItems.length} />
+      <div className="grid gap-3 md:grid-cols-5">
+        <InfoBlock label="参考图" value={learning?.total ?? 0} />
+        <InfoBlock label="待学习" value={countByStatus(statuses, "pending")} />
+        <InfoBlock label="学习中" value={countByStatus(statuses, "learning")} />
+        <InfoBlock label="已学习" value={countByStatus(statuses, "learned")} />
+        <InfoBlock label="失败" value={countByStatus(statuses, "failed")} />
       </div>
 
-      <div className="flex flex-wrap gap-2 rounded-md border border-zinc-200 bg-white p-2">
-        <Button
-          className="h-8 px-2 text-xs"
-          variant={category === "all" ? "default" : "outline"}
-          onClick={() => setCategory("all")}
-        >
-          全部 ({learning?.total ?? 0})
-        </Button>
-        {categories.map((item) => (
+      <div className="space-y-2 rounded-md border border-zinc-200 bg-white p-2">
+        <div className="flex flex-wrap gap-2">
           <Button
-            key={item.category}
             className="h-8 px-2 text-xs"
-            variant={category === item.category ? "default" : "outline"}
-            onClick={() => setCategory(item.category)}
+            variant={category === "all" ? "default" : "outline"}
+            onClick={() => setCategory("all")}
           >
-            {item.category} ({item.count})
+            全部类目 ({learning?.total ?? 0})
           </Button>
-        ))}
+          {categories.map((item) => (
+            <Button
+              key={item.category}
+              className="h-8 px-2 text-xs"
+              variant={category === item.category ? "default" : "outline"}
+              onClick={() => setCategory(item.category)}
+            >
+              {item.category} ({item.count})
+            </Button>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-2 border-t border-zinc-100 pt-2">
+          {statusOptions.map((item) => (
+            <Button
+              key={item.status}
+              className="h-8 px-2 text-xs"
+              variant={status === item.status ? "default" : "outline"}
+              onClick={() => setStatus(item.status)}
+            >
+              {item.label} ({item.count})
+            </Button>
+          ))}
+        </div>
       </div>
 
       {visibleItems.length === 0 ? (
@@ -954,8 +1085,9 @@ function EnrouteLearningPage({
 function EnrouteLearningCard({ item }: { item: EnrouteLearningItem }) {
   const selectedModel = asRecord(item.selected_model_profile);
   const analysis = asRecord(item.analysis || item.analysis_json);
+  const statusVariant = learningStatusBadgeVariant(item.status);
   return (
-    <Card>
+    <Card className={item.status === "failed" ? "border-red-200 bg-red-50/20" : ""}>
       <CardHeader className="flex flex-row items-start justify-between gap-3">
         <div className="min-w-0">
           <CardTitle>{item.enroute_title || item.enroute_product_id}</CardTitle>
@@ -963,7 +1095,12 @@ function EnrouteLearningCard({ item }: { item: EnrouteLearningItem }) {
             {item.enroute_product_id}
           </p>
         </div>
-        <Badge variant="secondary">{item.enroute_category || "未分类"}</Badge>
+        <div className="flex shrink-0 flex-col items-end gap-2">
+          <Badge variant="secondary">{item.enroute_category || "未分类"}</Badge>
+          <Badge variant={statusVariant}>
+            {learningStatusLabel(item.status)}
+          </Badge>
+        </div>
       </CardHeader>
       <CardContent className="grid gap-4 md:grid-cols-[220px_1fr]">
         <div className="min-w-0">
@@ -975,8 +1112,12 @@ function EnrouteLearningCard({ item }: { item: EnrouteLearningItem }) {
             rows={[
               ["类目", item.enroute_category],
               ["Handle", item.enroute_handle],
+              ["状态", learningStatusLabel(item.status)],
+              ["尝试次数", item.learning_attempts],
               ["图片位置", item.image_position],
               ["模特", selectedModel.name || selectedModel.profile_key],
+              ["学习时间", item.learned_at],
+              ["错误", item.last_error],
               ["更新时间", item.updated_at],
             ]}
           />
@@ -1048,10 +1189,10 @@ function PromptsPage({
               <button
                 key={item.dir}
                 onClick={() => setSelectedDir(item.dir)}
-                className={`w-full rounded-md border p-2 text-left transition-colors ${
+                className={`w-full rounded-lg border p-2.5 text-left transition-all ${
                   active
-                    ? "border-zinc-950 bg-zinc-50"
-                    : "border-zinc-200 bg-white hover:bg-zinc-50"
+                    ? "border-brand-300 bg-brand-50/60 shadow-sm ring-1 ring-brand-200"
+                    : "border-zinc-200 bg-white hover:border-zinc-300 hover:bg-zinc-50"
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
@@ -1242,20 +1383,24 @@ function PromptEditor({
 function ThreadDetail({
   thread,
   state,
+  learning,
   resumeJson,
   setResumeJson,
   loading,
   activeAction,
   onResume,
+  onRetryNode,
   onOpenStudio,
 }: {
   thread?: WorkflowThread;
   state: ThreadStateResponse | null;
+  learning: EnrouteLearningResponse | null;
   resumeJson: string;
   setResumeJson: (value: string) => void;
   loading: boolean;
   activeAction: ActionKey | null;
   onResume: (payload: unknown, actionKey: ActionKey) => void;
+  onRetryNode: (node: string) => void;
   onOpenStudio: () => void;
 }) {
   if (!thread) {
@@ -1274,36 +1419,499 @@ function ThreadDetail({
   const canResume = Boolean(thread.summary.can_resume);
   const progress = state?.progress ?? thread.progress;
   const grsaiReview = buildGrsaiReview(state?.state);
+  const aiCalls = state?.ai_calls ?? buildAiCallsFromState(state?.state);
+  const productUrl = productSourceUrl(thread, state?.state);
+  const nodes = buildWorkflowNodes({
+    thread,
+    state: state?.state,
+    learning,
+    review: grsaiReview,
+    canResume,
+    loading,
+    activeAction,
+    resumeJson,
+    setResumeJson,
+    onResume,
+    onRetryNode,
+  });
+  const doneCount = nodes.filter((node) => node.state === "done").length;
 
   return (
     <Card>
       <CardHeader className="flex flex-row items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <CardTitle>任务详情</CardTitle>
-          <p className="mt-2 font-mono text-xs text-zinc-500">{thread.thread_id}</p>
+          <p className="mt-2 break-all font-mono text-xs text-zinc-500">
+            {thread.thread_id}
+          </p>
         </div>
-        <Button variant="outline" onClick={onOpenStudio}>
-          <ExternalLink className="h-4 w-4" />
-          Studio
-        </Button>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          {productUrl ? (
+            <a
+              className="inline-flex h-9 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-zinc-200 bg-white px-3.5 text-sm font-medium text-zinc-800 shadow-sm transition-all duration-150 hover:-translate-y-px hover:border-zinc-300 hover:bg-zinc-50 hover:text-zinc-950 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 focus-visible:ring-offset-2 active:translate-y-0 active:scale-[0.98] active:shadow-sm"
+              href={productUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <ExternalLink className="h-4 w-4" />
+              1688 原始页
+            </a>
+          ) : null}
+          <Button variant="outline" onClick={onOpenStudio}>
+            <ExternalLink className="h-4 w-4" />
+            Studio
+          </Button>
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <ProgressPanel progress={progress} threadStatus={thread.status} />
-        <WorkflowNodesPanel
-          thread={thread}
-          state={state?.state}
-          review={grsaiReview}
-          canResume={canResume}
-          loading={loading}
-          activeAction={activeAction}
-          resumeJson={resumeJson}
-          setResumeJson={setResumeJson}
-          onResume={onResume}
-        />
-        <StatePanel state={state?.state} />
+        <CurrentStatusBanner thread={thread} nodes={nodes} progress={progress} />
+
+        {thread.summary.needs_manual_review || canResume ? (
+          <section className="rounded-xl border border-amber-200 bg-amber-50/50 p-3.5 shadow-sm">
+            <ManualReviewActions
+              canResume={canResume}
+              loading={loading}
+              activeAction={activeAction}
+              resumeJson={resumeJson}
+              setResumeJson={setResumeJson}
+              onResume={onResume}
+            />
+          </section>
+        ) : null}
+
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-zinc-900">执行流程</h3>
+            <Badge variant="secondary">
+              {doneCount}/{nodes.length} 节点完成
+            </Badge>
+          </div>
+          <WorkflowTimeline nodes={nodes} aiCalls={aiCalls} />
+        </section>
+
+        <details className="rounded-xl border border-zinc-200 bg-white">
+          <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-zinc-600">
+            运行进度与任务
+          </summary>
+          <div className="border-t border-zinc-200 p-3">
+            <ProgressPanel progress={progress} threadStatus={thread.status} />
+          </div>
+        </details>
+
+        <details className="rounded-xl border border-zinc-200 bg-white">
+          <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-zinc-600">
+            完整 State 调试
+          </summary>
+          <div className="border-t border-zinc-200 p-3">
+            <StatePanel state={state?.state} />
+          </div>
+        </details>
       </CardContent>
     </Card>
   );
+}
+
+type OverallStatus = "running" | "queued" | "review" | "error" | "done" | "idle";
+
+function overallThreadStatus(
+  thread: WorkflowThread,
+  nodes: WorkflowNode[],
+  progress?: ThreadProgress,
+): OverallStatus {
+  if (thread.summary.needs_manual_review) {
+    return "review";
+  }
+  if (Boolean(progress?.running)) {
+    return "running";
+  }
+  if (Boolean(progress?.queued) || progress?.status === "pending") {
+    return "queued";
+  }
+  if (thread.status === "busy") {
+    return "running";
+  }
+  if (thread.status === "error" || nodes.some((node) => node.state === "error")) {
+    return "error";
+  }
+  if (
+    thread.summary.wearing_image_status === "ok" ||
+    (nodes.length > 0 &&
+      nodes.every((node) => node.state === "done" || node.state === "skipped"))
+  ) {
+    return "done";
+  }
+  return "idle";
+}
+
+function CurrentStatusBanner({
+  thread,
+  nodes,
+  progress,
+}: {
+  thread: WorkflowThread;
+  nodes: WorkflowNode[];
+  progress?: ThreadProgress;
+}) {
+  const status = overallThreadStatus(thread, nodes, progress);
+  const activeNode =
+    nodes.find((node) => node.state === "active") ??
+    nodes.find((node) => node.state === "error");
+  const meta: Record<
+    OverallStatus,
+    { label: string; icon: typeof Activity; spin?: boolean; tint: string }
+  > = {
+    running: {
+      label: "执行中",
+      icon: Loader2,
+      spin: true,
+      tint: "border-brand-200 bg-brand-50/70 text-brand-700",
+    },
+    queued: {
+      label: "排队中",
+      icon: Clock,
+      tint: "border-amber-200 bg-amber-50/70 text-amber-700",
+    },
+    review: {
+      label: "等待人工审核",
+      icon: PauseCircle,
+      tint: "border-amber-200 bg-amber-50/70 text-amber-700",
+    },
+    error: {
+      label: "异常中断",
+      icon: AlertCircle,
+      tint: "border-red-200 bg-red-50/70 text-red-700",
+    },
+    done: {
+      label: "已完成",
+      icon: CheckCircle2,
+      tint: "border-emerald-200 bg-emerald-50/70 text-emerald-700",
+    },
+    idle: {
+      label: "空闲",
+      icon: Clock,
+      tint: "border-zinc-200 bg-zinc-50 text-zinc-600",
+    },
+  };
+  const current = meta[status];
+  const Icon = current.icon;
+  const nodeLabel = activeNode?.title || thread.summary.current_node_label || "";
+  const detail =
+    progress?.message ||
+    thread.summary.stop_reason_detail ||
+    thread.summary.stop_reason ||
+    "—";
+
+  return (
+    <div className={`flex items-center gap-3 rounded-xl border p-3.5 shadow-sm ${current.tint}`}>
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white/70 shadow-sm">
+        <Icon className={`h-5 w-5 ${current.spin ? "animate-spin" : ""}`} />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2">
+          <span className="text-sm font-semibold">{current.label}</span>
+          {nodeLabel && status !== "done" && status !== "idle" ? (
+            <span className="truncate text-sm font-medium opacity-80">
+              · {nodeLabel}
+            </span>
+          ) : null}
+        </div>
+        <p className="mt-0.5 truncate text-xs opacity-80">{detail}</p>
+      </div>
+      {progress?.elapsed_label ? (
+        <span className="shrink-0 font-mono text-xs font-medium opacity-75">
+          {progress.elapsed_label}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function NodeAiCall({ call }: { call: AiCallSummary }) {
+  const isImage = call.kind === "image_ai";
+  const input = asRecord(call.input);
+  const output = asRecord(call.output);
+  const promptText = stringValue(output.prompt || input.prompt);
+  const providers = arrayValue(call.providers)
+    .map((provider) => {
+      const record = asRecord(provider);
+      return stringValue(record.name) || stringValue(record.api_base);
+    })
+    .filter(Boolean)
+    .join(" / ");
+  const summaryRows = aiCallOutputSummary(call).filter(
+    ([, value]) => !isEmptyDisplay(value),
+  );
+  const hasInput = Object.keys(input).length > 0;
+  const hasOutput = Object.keys(output).length > 0;
+
+  return (
+    <div className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50/60 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span
+            className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
+              isImage ? "bg-violet-100 text-violet-700" : "bg-sky-100 text-sky-700"
+            }`}
+          >
+            {isImage ? (
+              <ImageIcon className="h-3.5 w-3.5" />
+            ) : (
+              <Cpu className="h-3.5 w-3.5" />
+            )}
+          </span>
+          <span className="truncate text-sm font-medium text-zinc-800">
+            {isImage ? "图片 AI 调用" : "LLM 调用"}
+          </span>
+        </div>
+        <Badge variant={aiCallStatusVariant(call.status)}>
+          {aiCallStatusLabel(call.status)}
+        </Badge>
+      </div>
+
+      {call.model || providers ? (
+        <p className="text-xs text-zinc-500">
+          {call.model ? (
+            <>
+              模型 <span className="font-medium text-zinc-700">{call.model}</span>
+            </>
+          ) : null}
+          {call.model && providers ? " · " : null}
+          {providers ? (
+            <>
+              Provider{" "}
+              <span className="font-medium text-zinc-700">{providers}</span>
+            </>
+          ) : null}
+        </p>
+      ) : null}
+
+      {call.images.length > 0 ? (
+        <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
+          {call.images.map((image) => (
+            <ImagePreview
+              key={`${call.key}-${image.role}-${image.path}`}
+              label={`${image.label} · ${aiImageRoleLabel(image.role)}`}
+              path={image.path}
+              url={imageDisplayUrl(image.path)}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {promptText ? (
+        <PromptBlock
+          label={isImage ? "生图提示词 Prompt" : "提示词 Prompt"}
+          text={promptText}
+        />
+      ) : null}
+
+      {summaryRows.length > 0 ? (
+        <div className="space-y-2">
+          <span className="text-xs font-medium text-zinc-500">输出结果</span>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {summaryRows.map(([label, value]) => (
+              <InfoBlock key={label} label={label} value={value} />
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap gap-1.5">
+        {hasInput ? <JsonModalButton label="输入 JSON" value={input} /> : null}
+        {hasOutput ? <JsonModalButton label="输出 JSON" value={output} /> : null}
+        {Object.keys(call.prompts || {}).length > 0 ? (
+          <JsonModalButton label="Prompt 版本" value={call.prompts} />
+        ) : null}
+        <JsonModalButton label="原始 checkpoint" value={call.raw_checkpoint} />
+      </div>
+    </div>
+  );
+}
+
+function PromptBlock({ label, text }: { label: string; text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-zinc-500">{label}</span>
+        <span className="text-[10px] text-zinc-400">{text.length} 字符</span>
+      </div>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="group block w-full rounded-lg border border-zinc-200 bg-white p-3 text-left transition-colors hover:border-brand-300 hover:bg-brand-50/30"
+      >
+        <p className="line-clamp-4 whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-zinc-600">
+          {text}
+        </p>
+        <span className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-brand-600 transition-colors group-hover:text-brand-700">
+          <Maximize2 className="h-3.5 w-3.5" />
+          查看完整提示词
+        </span>
+      </button>
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title={label}
+        description={`${text.length} 字符`}
+        footer={
+          <>
+            <CopyButton text={text} />
+            <Button variant="outline" onClick={() => setOpen(false)}>
+              关闭
+            </Button>
+          </>
+        }
+      >
+        <pre className="whitespace-pre-wrap break-words rounded-lg bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-50">
+          {text}
+        </pre>
+      </Dialog>
+    </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Button
+      variant="secondary"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        } catch {
+          /* clipboard unavailable */
+        }
+      }}
+    >
+      {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+      {copied ? "已复制" : "复制"}
+    </Button>
+  );
+}
+
+function JsonModalButton({ label, value }: { label: string; value: unknown }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-white px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:border-brand-300 hover:text-brand-700"
+      >
+        <Maximize2 className="h-3 w-3" />
+        {label}
+      </button>
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title={label}
+        footer={
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            关闭
+          </Button>
+        }
+      >
+        <JsonViewer value={value} />
+      </Dialog>
+    </>
+  );
+}
+
+function aiCallStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    ok: "成功",
+    success: "成功",
+    succeeded: "成功",
+    failed: "失败",
+    error: "失败",
+    running: "执行中",
+    in_progress: "执行中",
+    skipped: "已跳过",
+    pending: "等待中",
+  };
+  return labels[status] ?? (status || "-");
+}
+
+function aiCallOutputSummary(call: AiCallSummary): Array<[string, unknown]> {
+  const output = asRecord(call.output);
+  if (call.key === "detect_size_reference") {
+    return [
+      ["产品合格", output.is_product_qualified],
+      ["失败项", output.failed_checks],
+      ["可判断尺寸", output.can_judge_size],
+      ["尺寸图编号", output.size_reference_image_number],
+      ["主图编号", output.main_image_number],
+      ["原因", output.reason],
+    ];
+  }
+  if (call.key.startsWith("learn_enroute_reference")) {
+    return [
+      ["缓存", output.cache],
+      ["Enroute ID", output.enroute_product_id],
+      ["类目", output.category],
+      ["摘要", output.summary],
+    ];
+  }
+  if (call.key === "select_wearing_style_profile") {
+    const selectedModel = asRecord(output.selected_model_profile);
+    const selection = asRecord(output.selection);
+    return [
+      ["Enroute ID", output.enroute_product_id],
+      ["类目", output.category],
+      ["模特", selectedModel.name || selectedModel.profile_key],
+      ["选择依据", selection.reason],
+    ];
+  }
+  if (call.key === "compile_wearing_generation_prompt") {
+    const selectedModel = asRecord(output.selected_model_profile);
+    return [
+      ["原因", output.reason],
+      ["Prompt 长度", output.prompt_length],
+      ["输入图", arrayValue(output.input_images).length],
+      ["模特", selectedModel.name || selectedModel.profile_key],
+      ["Enroute 图", output.enroute_reference_image_path],
+    ];
+  }
+  if (call.key.startsWith("generate_wearing_image")) {
+    const imageGeneration = asRecord(output.image_generation);
+    return [
+      ["原因", output.reason],
+      ["Attempt", output.attempt],
+      ["Grsai 任务", imageGeneration.id],
+      ["Grsai 状态", imageGeneration.status],
+      ["进度", imageGeneration.progress],
+      ["生成图", output.generated_image_path || output.generated_image_url],
+    ];
+  }
+  return [
+    ["状态", output.status],
+    ["原因", output.reason],
+  ];
+}
+
+function aiCallStatusVariant(status: string) {
+  if (status === "ok" || status === "succeeded" || status === "success") {
+    return "success";
+  }
+  if (status === "failed" || status === "error") {
+    return "danger";
+  }
+  if (status === "running" || status === "in_progress") {
+    return "warning";
+  }
+  return "secondary";
+}
+
+function aiImageRoleLabel(role: string) {
+  const labels: Record<string, string> = {
+    input: "输入",
+    output: "输出",
+    context: "上下文",
+  };
+  return labels[role] ?? role;
 }
 
 function ManualReviewActions({
@@ -1337,7 +1945,7 @@ function ManualReviewActions({
   return (
     <div className="space-y-3">
       <p className="text-sm font-medium">审核动作</p>
-      <div className="grid gap-2 md:grid-cols-3">
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
         <Button
           onClick={() => onResume({ action: "approve" }, "resume-approve")}
           disabled={disabled}
@@ -1354,6 +1962,17 @@ function ManualReviewActions({
           loadingText="提交中"
         >
           Regenerate
+        </Button>
+        <Button
+          variant="outline"
+          onClick={() =>
+            onResume({ action: "recompile_prompt" }, "resume-recompile-prompt")
+          }
+          disabled={disabled}
+          loading={activeAction === "resume-recompile-prompt"}
+          loadingText="提交中"
+        >
+          Recompile Prompt
         </Button>
         <Button
           variant="destructive"
@@ -1404,76 +2023,148 @@ type WorkflowNode = {
   content?: ReactNode;
 };
 
-function WorkflowNodesPanel({
-  thread,
-  state,
-  review,
-  canResume,
-  loading,
-  activeAction,
-  resumeJson,
-  setResumeJson,
-  onResume,
-}: {
-  thread: WorkflowThread;
-  state: unknown;
-  review: GrsaiReview;
-  canResume: boolean;
-  loading: boolean;
-  activeAction: ActionKey | null;
-  resumeJson: string;
-  setResumeJson: (value: string) => void;
-  onResume: (payload: unknown, actionKey: ActionKey) => void;
-}) {
-  const nodes = buildWorkflowNodes({
-    thread,
-    state,
-    review,
-    canResume,
-    loading,
-    activeAction,
-    resumeJson,
-    setResumeJson,
-    onResume,
-  });
+function aiCallNodeId(key: string): string {
+  if (key.startsWith("learn_enroute_reference")) {
+    return "learn_enroute_profiles";
+  }
+  if (key.startsWith("generate_wearing_image")) {
+    return "generate_wearing_image";
+  }
+  return key;
+}
 
+function aiCallsForNode(
+  nodeId: string,
+  calls: AiCallSummary[],
+): AiCallSummary[] {
+  return calls.filter((call) => aiCallNodeId(call.key) === nodeId);
+}
+
+function WorkflowTimeline({
+  nodes,
+  aiCalls,
+}: {
+  nodes: WorkflowNode[];
+  aiCalls: AiCallSummary[];
+}) {
   return (
-    <div className="space-y-3">
-      {nodes.map((node) => (
-        <WorkflowNodeCard key={node.id} node={node} />
+    <ol className="relative">
+      {nodes.map((node, index) => (
+        <TimelineNode
+          key={node.id}
+          node={node}
+          calls={aiCallsForNode(node.id, aiCalls)}
+          isLast={index === nodes.length - 1}
+        />
       ))}
-    </div>
+    </ol>
   );
 }
 
-function WorkflowNodeCard({ node }: { node: WorkflowNode }) {
+function NodeStateIcon({ state }: { state: WorkflowNodeState }) {
+  if (state === "done") {
+    return <Check className="h-3.5 w-3.5" />;
+  }
+  if (state === "error") {
+    return <AlertCircle className="h-3.5 w-3.5" />;
+  }
+  if (state === "skipped") {
+    return <Minus className="h-3.5 w-3.5" />;
+  }
+  if (state === "active") {
+    return <span className="h-2 w-2 rounded-full bg-white" />;
+  }
+  return <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />;
+}
+
+function nodeDotBg(state: WorkflowNodeState) {
+  const classes: Record<WorkflowNodeState, string> = {
+    done: "bg-emerald-500 text-white",
+    active: "bg-brand-500 text-white",
+    pending: "bg-white",
+    error: "bg-red-500 text-white",
+    skipped: "bg-zinc-300 text-white",
+  };
+  return classes[state];
+}
+
+function TimelineNode({
+  node,
+  calls,
+  isLast,
+}: {
+  node: WorkflowNode;
+  calls: AiCallSummary[];
+  isLast: boolean;
+}) {
   const showDetail = node.state !== "pending" && node.state !== "skipped";
   const rows = showDetail
     ? (node.rows ?? []).filter(([, value]) => !isEmptyDisplay(value))
     : [];
+  const isActive = node.state === "active";
+  const isError = node.state === "error";
+
   return (
-    <section className="rounded-md border border-zinc-200 bg-white">
-      <div className="flex flex-wrap items-start justify-between gap-3 px-3 py-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className={`h-2.5 w-2.5 rounded-full ${nodeDotClass(node.state)}`} />
-            <h3 className="text-sm font-medium">{node.title}</h3>
+    <li className="relative flex gap-3 pb-3 last:pb-0">
+      {!isLast ? (
+        <span
+          className="absolute left-[13px] top-7 bottom-0 w-px bg-zinc-200"
+          aria-hidden
+        />
+      ) : null}
+      <span
+        className={`relative z-10 mt-0.5 flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full border border-zinc-200 ring-4 ring-white ${nodeDotBg(
+          node.state,
+        )} ${isActive ? "animate-pulse" : ""}`}
+      >
+        <NodeStateIcon state={node.state} />
+      </span>
+
+      <div
+        className={`min-w-0 flex-1 rounded-xl border p-3 transition-colors ${
+          isActive
+            ? "border-brand-200 bg-brand-50/40 shadow-sm ring-1 ring-brand-100"
+            : isError
+              ? "border-red-200 bg-red-50/40"
+              : "border-zinc-200 bg-white"
+        }`}
+      >
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <h4 className="text-sm font-semibold text-zinc-900">{node.title}</h4>
+            <p className="mt-0.5 text-sm text-zinc-600">{node.summary}</p>
           </div>
-          <p className="mt-1 text-sm text-zinc-600">{node.summary}</p>
+          <Badge variant={nodeBadgeVariant(node.state)}>
+            {nodeStateLabel(node.state)}
+          </Badge>
         </div>
-        <Badge variant={nodeBadgeVariant(node.state)}>{nodeStateLabel(node.state)}</Badge>
+
+        {rows.length ? (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {rows.map(([label, value]) => (
+              <InfoBlock key={label} label={label} value={value} />
+            ))}
+          </div>
+        ) : null}
+
+        {calls.length > 0 ? (
+          <div className="mt-3 space-y-2.5">
+            {calls.map((call) => (
+              <NodeAiCall key={call.key} call={call} />
+            ))}
+          </div>
+        ) : null}
+
+        {showDetail && node.content ? (
+          <details className="mt-3 rounded-lg border border-zinc-200 bg-white">
+            <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-zinc-500">
+              更多详情
+            </summary>
+            <div className="border-t border-zinc-200 p-3">{node.content}</div>
+          </details>
+        ) : null}
       </div>
-      {rows.length ? (
-        <div className="grid gap-2 border-t border-zinc-200 p-3 md:grid-cols-2">
-          {rows.map(([label, value]) => (
-            <InfoBlock key={label} label={label} value={value} />
-          ))}
-        </div>
-      ) : null}
-      {showDetail && node.content ? (
-        <div className="border-t border-zinc-200 p-3">{node.content}</div>
-      ) : null}
-    </section>
+    </li>
   );
 }
 
@@ -1495,6 +2186,7 @@ function isEmptyDisplay(value: unknown): boolean {
 function buildWorkflowNodes({
   thread,
   state,
+  learning,
   review,
   canResume,
   loading,
@@ -1502,9 +2194,11 @@ function buildWorkflowNodes({
   resumeJson,
   setResumeJson,
   onResume,
+  onRetryNode,
 }: {
   thread: WorkflowThread;
   state: unknown;
+  learning: EnrouteLearningResponse | null;
   review: GrsaiReview;
   canResume: boolean;
   loading: boolean;
@@ -1512,6 +2206,7 @@ function buildWorkflowNodes({
   resumeJson: string;
   setResumeJson: (value: string) => void;
   onResume: (payload: unknown, actionKey: ActionKey) => void;
+  onRetryNode: (node: string) => void;
 }): WorkflowNode[] {
   const root = asRecord(state);
   const values = asRecord(root.values);
@@ -1520,12 +2215,27 @@ function buildWorkflowNodes({
   const mainImage = asRecord(values.main_image_result);
   const sizeReference = asRecord(values.size_reference_result);
   const enrouteReference = asRecord(values.enroute_reference_result);
+  const enrouteLearning = asRecord(values.enroute_learning_result);
   const enrouteAnalysis = asRecord(values.enroute_analysis_result);
+  const wearingStyleSelectionRaw = asRecord(values.wearing_style_selection_result);
+  const wearingStyleSelection = Object.keys(wearingStyleSelectionRaw).length
+    ? wearingStyleSelectionRaw
+    : enrouteAnalysis;
+  const wearingPrompt = asRecord(values.wearing_generation_prompt_result);
   const wearing = asRecord(values.wearing_image_result);
   const nextNodes = Array.isArray(root.next) ? root.next.map(String) : thread.summary.next ?? [];
   const currentNode = nextNodes[0] || "";
   const failedProduct = asRecord(values.failed_product);
   const isFailed = Boolean(failedProduct.reason);
+  const styleSelectionPayload = asRecord(wearingStyleSelection.selection);
+  const selectedModel = resolvedSelectedModel(wearingStyleSelection);
+  const plannedLearningRows = learningRowsForReferencePlan(enrouteReference, learning);
+  const learningRowCounts = countLearningItemsByStatus(plannedLearningRows);
+  const categoryLearningRows = learningRowsForCategory(
+    stringValue(enrouteLearning.category || enrouteReference.category),
+    learning,
+  );
+  const categoryLearningCounts = countLearningItemsByStatus(categoryLearningRows);
 
   return [
     {
@@ -1541,9 +2251,9 @@ function buildWorkflowNodes({
       ],
     },
     {
-      id: "prepare_main_images",
+      id: "merge_main_images",
       title: "准备主图",
-      state: statusToNodeState(mainImage.status, "prepare_main_images", currentNode, nextNodes, isFailed),
+      state: statusToNodeState(mainImage.status, "merge_main_images", currentNode, nextNodes, isFailed),
       summary: mainImage.status
         ? `主图聚合状态：${displayValue(mainImage.status)}。`
         : "等待下载并合并商品主图。",
@@ -1555,38 +2265,113 @@ function buildWorkflowNodes({
     },
     {
       id: "detect_size_reference",
-      title: "尺寸检测",
+      title: "产品合格性检测",
       state: statusToNodeState(sizeReference.status, "detect_size_reference", currentNode, nextNodes, isFailed),
       summary: sizeReference.reason
         ? displayValue(sizeReference.reason)
-        : "识别可用于比例判断的商品图。",
+        : "检测商品是否具备继续生成穿戴图所需的合格素材。",
       rows: [
         ["状态", sizeReference.status],
+        ["产品合格", sizeReference.is_product_qualified],
+        ["失败项", sizeReference.failed_checks],
         ["可判断尺寸", sizeReference.can_judge_size],
         ["尺寸参考图编号", sizeReference.size_reference_image_number],
         ["主图编号", sizeReference.main_image_number],
       ],
+      content: <ProductQualificationPanel result={sizeReference} />,
     },
     {
-      id: "analyze_enroute_reference",
-      title: "Enroute / 模特",
-      state: statusToNodeState(enrouteAnalysis.status || enrouteReference.status, "analyze_enroute_reference", currentNode, nextNodes, isFailed),
-      summary: displayValue(
-        enrouteAnalysis.summary ||
-          asRecord(enrouteAnalysis.selection).reason ||
-          enrouteReference.reason ||
-          "选择并分析同类目佩戴参考。",
-      ),
+      id: "select_enroute_reference",
+      title: "选择 Enroute 参考图",
+      state: statusToNodeState(enrouteReference.status, "select_enroute_reference", currentNode, nextNodes, isFailed),
+      summary: enrouteReference.reason
+        ? reasonLabel(displayValue(enrouteReference.reason))
+        : "按商品类目读取 Enroute 同类目参考图库。",
       rows: [
-        ["参考图状态", enrouteReference.status],
-        ["分析状态", enrouteAnalysis.status],
-        ["参考图", enrouteAnalysis.reference_image_path],
-        ["模特", asRecord(asRecord(enrouteAnalysis.analysis).selected_model_profile).name],
+        ["状态", enrouteReference.status],
+        ["类目", enrouteReference.category],
+        ["参考图数量", enrouteReference.reference_count],
+        ["已有缓存", enrouteReference.cached_analysis_count],
+        ["未学习数量", enrouteReference.unlearned_count],
+        ["本次学习", enrouteReference.learning_count],
+      ],
+      content: <EnrouteReferencePanel reference={enrouteReference} />,
+    },
+    {
+      id: "learn_enroute_profiles",
+      title: "学习 Enroute profile",
+      state: statusToNodeState(enrouteLearning.status, "learn_enroute_profiles", currentNode, nextNodes, isFailed),
+      summary: enrouteLearning.reason
+        ? reasonLabel(displayValue(enrouteLearning.reason))
+        : "按数据库学习表串行推进本次计划：缓存少于 5 学 5 张，缓存达到 5 后学 1 张。",
+      rows: [
+        ["状态", enrouteLearning.status],
+        ["类目", enrouteLearning.category || enrouteReference.category],
+        ["本次计划", plannedLearningRows.length || enrouteReference.learning_count],
+        ["计划待学习", learningRowCounts.pending],
+        ["计划学习中", learningRowCounts.learning],
+        ["计划已学习", learningRowCounts.learned],
+        ["计划失败", learningRowCounts.failed],
+        ["学习后缓存", enrouteLearning.cached_analysis_count_after_learning],
       ],
       content: (
-        <EnrouteNodePanel
+        <EnrouteLearningPanel
           reference={enrouteReference}
-          analysis={enrouteAnalysis}
+          learning={enrouteLearning}
+          plannedRows={plannedLearningRows}
+          categoryCounts={categoryLearningCounts}
+        />
+      ),
+    },
+    {
+      id: "select_wearing_style_profile",
+      title: "选择风格与模特",
+      state: statusToNodeState(wearingStyleSelection.status, "select_wearing_style_profile", currentNode, nextNodes, isFailed),
+      summary: displayValue(
+        styleSelectionPayload.reason ||
+          wearingStyleSelection.summary ||
+          enrouteReference.reason ||
+          "从已学习 Enroute profile 和模特摘要中选择风格组合。",
+      ),
+      rows: [
+        ["状态", wearingStyleSelection.status],
+        ["Enroute", wearingStyleSelection.enroute_product_id],
+        ["类目", wearingStyleSelection.category],
+        ["模特", selectedModel.name || selectedModel.profile_key],
+        ["选择依据", styleSelectionPayload.reason],
+      ],
+      content: (
+        <WearingStyleSelectionPanel
+          reference={enrouteReference}
+          selection={wearingStyleSelection}
+        />
+      ),
+    },
+    {
+      id: "compile_wearing_generation_prompt",
+      title: "编排生图提示词",
+      state: statusToNodeState(wearingPrompt.status, "compile_wearing_generation_prompt", currentNode, nextNodes, isFailed),
+      summary: wearingPrompt.reason
+        ? reasonLabel(displayValue(wearingPrompt.reason))
+        : "加载实际 Enroute profile、模特 profile、产品图和尺寸图，生成生图提示词。",
+      rows: [
+        ["状态", wearingPrompt.status],
+        ["输入图数量", arrayValue(wearingPrompt.input_images).length],
+        ["提示词长度", stringValue(wearingPrompt.prompt).length],
+        ["标记主图", wearingPrompt.marked_main_image_path],
+        ["标记尺寸图", wearingPrompt.marked_size_reference_image_path],
+        [
+          "模特",
+          resolvedSelectedModel(wearingPrompt).name ||
+            resolvedSelectedModel(wearingPrompt).profile_key,
+        ],
+      ],
+      content: (
+        <WearingPromptPanel
+          result={wearingPrompt}
+          loading={loading}
+          activeAction={activeAction}
+          onRetry={() => onRetryNode("compile_wearing_generation_prompt")}
         />
       ),
     },
@@ -1673,21 +2458,13 @@ function statusToNodeState(
   if (value === "skipped") {
     return "skipped";
   }
-  if (value === "failed" || value === "error" || isFailed) {
+  if (value === "failed" || value === "error") {
+    return "error";
+  }
+  if (isFailed) {
     return currentNode === nodeId || !currentNode ? "error" : "pending";
   }
   return nodeState(nodeId, currentNode, nextNodes, isFailed);
-}
-
-function nodeDotClass(state: WorkflowNodeState) {
-  const classes: Record<WorkflowNodeState, string> = {
-    done: "bg-emerald-500",
-    active: "bg-amber-500",
-    pending: "bg-zinc-300",
-    error: "bg-red-500",
-    skipped: "bg-zinc-400",
-  };
-  return classes[state];
 }
 
 function nodeBadgeVariant(state: WorkflowNodeState) {
@@ -1718,6 +2495,18 @@ function reasonLabel(reason: string) {
   const labels: Record<string, string> = {
     wearing_image_generated: "穿戴图已生成。",
     selected_main_or_size_reference_missing: "缺少主图或尺寸参考图。",
+    main_image_not_ready: "主图尚未准备好。",
+    no_matching_enroute_reference: "没有找到同类目 Enroute 参考图。",
+    reference_not_ready: "Enroute 参考选择尚未完成。",
+    enroute_category_missing: "缺少 Enroute 类目。",
+    no_cached_enroute_analysis: "没有可用的 Enroute profile 缓存。",
+    selected_product_images_missing: "缺少已选产品主图或尺寸参考图。",
+    style_profile_not_ready: "风格与模特选择尚未完成。",
+    selected_enroute_or_model_profile_missing: "缺少选中的 Enroute profile 或模特 profile。",
+    wearing_generation_prompt_compiled: "生图提示词已编排。",
+    compiled_prompt_or_input_images_missing: "缺少已编排提示词或输入图。",
+    size_reference_unusable: "尺寸参考不可用。",
+    product_qualification: "产品合格性检测未通过。",
   };
   return labels[reason] ?? reason;
 }
@@ -1736,66 +2525,254 @@ type GrsaiReview = {
   imageGeneration: Record<string, unknown>;
 };
 
-function EnrouteNodePanel({
-  reference,
-  analysis,
+function ProductQualificationPanel({
+  result,
 }: {
-  reference: Record<string, unknown>;
-  analysis: Record<string, unknown>;
+  result: Record<string, unknown>;
 }) {
-  const analysisJson = asRecord(analysis.analysis);
-  const selection = asRecord(analysis.selection);
-  const selectedModel = asRecord(analysisJson.selected_model_profile);
-  const learningReferences = arrayValue(reference.learning_references);
-  const learningResults = arrayValue(
-    reference.learning_results || analysis.learning_results,
-  );
-  const selectedImagePath = stringValue(
-    analysis.reference_image_path || reference.selected_image_path,
-  );
-  const selectedModelImagePath = stringValue(selectedModel.image_path);
-  const selectionReason = displayValue(
-    selection.reason || reference.selection_reason,
-  );
-  const summary = displayValue(analysis.summary || analysisJson.summary);
-  const hasAnalysis = Object.keys(analysisJson).length > 0;
-  const hasRaw = Object.keys(reference).length > 0 || Object.keys(analysis).length > 0;
+  const selectedImages = asRecord(result.selected_images);
+  const mainImage = asRecord(selectedImages.main_image);
+  const sizeReferenceImage = asRecord(selectedImages.size_reference_image);
+  const qualificationChecks = asRecord(result.qualification_checks);
+  const mainImagePath = stringValue(mainImage.path);
+  const sizeReferencePath = stringValue(sizeReferenceImage.path);
+  const hasRaw = Object.keys(result).length > 0;
 
   return (
     <div className="space-y-3">
       <div className="grid gap-3 lg:grid-cols-2">
         <KeyValuePanel
-          title="参考图库选择"
+          title="检测结果"
           rows={[
-            ["类目", reference.category || analysis.category],
-            ["参考图数量", reference.reference_count],
-            ["已有缓存", reference.cached_analysis_count],
-            ["学习后缓存", reference.cached_analysis_count_after_learning],
-            ["未学习数量", reference.unlearned_count],
-            ["本次学习", reference.learning_count],
+            ["状态", result.status],
+            ["产品合格", result.is_product_qualified],
+            ["失败项", result.failed_checks],
+            ["失败类型", result.failure_type],
+            ["失败详情", result.failure_detail],
+            ["原因", result.reason],
           ]}
         />
         <KeyValuePanel
-          title="当前商品匹配"
+          title="尺寸推断参考"
           rows={[
-            [
-              "选中 Enroute",
-              analysis.enroute_product_id || reference.selected_enroute_product_id,
-            ],
-            ["选择来源", analysis.cache || analysis.checkpoint],
-            ["分析状态", analysis.status],
-            [
-              "模特",
-              selectedModel.name || selectedModel.profile_key,
-            ],
-            ["选择依据", selectionReason],
+            ["可判断尺寸", result.can_judge_size],
+            ["候选图片编号", result.image_numbers],
+            ["主图编号", result.main_image_number],
+            ["尺寸参考图编号", result.size_reference_image_number],
+            ["主图路径", mainImage.path],
+            ["尺寸参考图路径", sizeReferenceImage.path],
+          ]}
+        />
+      </div>
+
+      {mainImagePath || sizeReferencePath ? (
+        <div className="grid gap-3 lg:grid-cols-2">
+          {mainImagePath ? (
+            <ImagePreview
+              label={`产品主图 ${displayValue(mainImage.number)}`}
+              path={mainImagePath}
+              url={imageDisplayUrl(mainImagePath)}
+            />
+          ) : null}
+          {sizeReferencePath ? (
+            <ImagePreview
+              label={`尺寸参考图 ${displayValue(sizeReferenceImage.number)}`}
+              path={sizeReferencePath}
+              url={imageDisplayUrl(sizeReferencePath)}
+            />
+          ) : null}
+        </div>
+      ) : null}
+
+      {Object.keys(qualificationChecks).length > 0 ? (
+        <details className="rounded-md border border-zinc-200 bg-white">
+          <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
+            合格性检查项
+          </summary>
+          <div className="border-t border-zinc-200 p-3">
+            <CompactJson value={qualificationChecks} />
+          </div>
+        </details>
+      ) : null}
+
+      {hasRaw ? (
+        <details className="rounded-md border border-zinc-200 bg-white">
+          <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
+            产品合格性原始结果
+          </summary>
+          <div className="border-t border-zinc-200 p-3">
+            <CompactJson value={result} />
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function EnrouteReferencePanel({
+  reference,
+}: {
+  reference: Record<string, unknown>;
+}) {
+  const learningReferences = arrayValue(reference.learning_references);
+  const selectedImagePath = stringValue(reference.selected_image_path);
+  const hasRaw = Object.keys(reference).length > 0;
+
+  return (
+    <div className="space-y-3">
+      <KeyValuePanel
+        title="参考图库"
+        rows={[
+          ["状态", reference.status],
+          ["类目", reference.category],
+          ["参考图数量", reference.reference_count],
+          ["已有缓存", reference.cached_analysis_count],
+          ["未学习数量", reference.unlearned_count],
+          ["本次计划学习", reference.learning_count],
+          ["选中 Enroute", reference.selected_enroute_product_id],
+          ["选择依据", reference.selection_reason],
+        ]}
+      />
+
+      {selectedImagePath ? (
+        <ImagePreview
+          label="选中 Enroute 参考图"
+          path={selectedImagePath}
+          url={imageDisplayUrl(selectedImagePath)}
+        />
+      ) : null}
+
+      {learningReferences.length > 0 ? (
+        <EnrouteRecordList title="本次待学习参考" items={learningReferences} />
+      ) : null}
+
+      {hasRaw ? (
+        <details className="rounded-md border border-zinc-200 bg-white">
+          <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
+            Enroute 参考选择原始结果
+          </summary>
+          <div className="border-t border-zinc-200 p-3">
+            <CompactJson value={reference} />
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function EnrouteLearningPanel({
+  reference,
+  learning,
+  plannedRows,
+  categoryCounts,
+}: {
+  reference: Record<string, unknown>;
+  learning: Record<string, unknown>;
+  plannedRows: EnrouteLearningItem[];
+  categoryCounts: LearningStatusCounts;
+}) {
+  const plannedIds = new Set(plannedRows.map((item) => item.enroute_product_id));
+  const fallbackReferences = arrayValue(reference.learning_references).filter((item) => {
+    const productId = stringValue(asRecord(item).product_id || asRecord(item).enroute_product_id);
+    return productId && !plannedIds.has(productId);
+  });
+  const hasRaw = Object.keys(reference).length > 0 || Object.keys(learning).length > 0;
+
+  return (
+    <div className="space-y-3">
+      <div className="grid gap-3 lg:grid-cols-2">
+        <KeyValuePanel
+          title="学习计划"
+          rows={[
+            ["类目", learning.category || reference.category],
+            ["参考总数", reference.reference_count],
+            ["缓存数", reference.cached_analysis_count],
+            ["未学习数量", reference.unlearned_count],
+            ["本次计划", plannedRows.length || reference.learning_count],
+          ]}
+        />
+        <KeyValuePanel
+          title="数据库学习状态"
+          rows={[
+            ["状态", learning.status],
+            ["原因", learning.reason],
+            ["待学习", categoryCounts.pending],
+            ["学习中", categoryCounts.learning],
+            ["已学习", categoryCounts.learned],
+            ["失败", categoryCounts.failed],
+            ["学习后缓存数", learning.cached_analysis_count_after_learning],
+          ]}
+        />
+      </div>
+
+      {plannedRows.length > 0 ? (
+        <LearningReferenceList title="本次计划参考" items={plannedRows} />
+      ) : null}
+      {fallbackReferences.length > 0 ? (
+        <EnrouteRecordList title="本次计划参考（state）" items={fallbackReferences} />
+      ) : null}
+
+      {hasRaw ? (
+        <details className="rounded-md border border-zinc-200 bg-white">
+          <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
+            Enroute 学习原始结果
+          </summary>
+          <div className="border-t border-zinc-200 p-3">
+            <CompactJson value={{ reference, learning }} />
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function WearingStyleSelectionPanel({
+  reference,
+  selection,
+}: {
+  reference: Record<string, unknown>;
+  selection: Record<string, unknown>;
+}) {
+  const analysisJson = asRecord(selection.analysis);
+  const selectionPayload = asRecord(selection.selection);
+  const selectedModel = resolvedSelectedModel(selection);
+  const selectedImagePath = stringValue(
+    selection.reference_image_path ||
+      selection.enroute_reference_image_path ||
+      reference.selected_image_path,
+  );
+  const selectedModelImagePath = stringValue(selectedModel.image_path);
+  const summary = displayValue(selection.summary || analysisJson.summary);
+  const hasRaw = Object.keys(selection).length > 0;
+
+  return (
+    <div className="space-y-3">
+      <div className="grid gap-3 lg:grid-cols-2">
+        <KeyValuePanel
+          title="选中 Enroute profile"
+          rows={[
+            ["状态", selection.status],
+            ["Enroute ID", selection.enroute_product_id],
+            ["类目", selection.category || reference.category],
+            ["选择来源", selection.cache || selection.checkpoint],
+            ["参考图", selection.reference_image_path || reference.selected_image_path],
+            ["选择依据", selectionPayload.reason || reference.selection_reason],
+          ]}
+        />
+        <KeyValuePanel
+          title="选中模特 profile"
+          rows={[
+            ["profile_key", selectedModel.profile_key],
+            ["name", selectedModel.name],
+            ["summary", selectedModel.summary],
+            ["image_path", selectedModel.image_path],
           ]}
         />
       </div>
 
       {summary !== "-" ? (
         <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
-          <p className="text-sm font-medium">逆向摘要</p>
+          <p className="text-sm font-medium">Enroute profile 摘要</p>
           <p className="mt-2 break-words text-sm leading-relaxed text-zinc-700">
             {summary}
           </p>
@@ -1821,38 +2798,21 @@ function EnrouteNodePanel({
         </div>
       ) : null}
 
-      {Object.keys(selectedModel).length > 0 ? (
-        <KeyValuePanel
-          title="选中模特"
-          rows={[
-            ["profile_key", selectedModel.profile_key],
-            ["name", selectedModel.name],
-            ["reason", selectedModel.reason],
-            ["image_path", selectedModel.image_path],
-          ]}
-        />
-      ) : null}
-
-      {learningReferences.length > 0 || learningResults.length > 0 ? (
+      {Object.keys(selectionPayload).length > 0 ? (
         <details className="rounded-md border border-zinc-200 bg-white">
           <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
-            逆向学习记录
+            风格与模特选择 JSON
           </summary>
-          <div className="space-y-3 border-t border-zinc-200 p-3">
-            {learningReferences.length > 0 ? (
-              <EnrouteRecordList title="待学习参考" items={learningReferences} />
-            ) : null}
-            {learningResults.length > 0 ? (
-              <EnrouteRecordList title="学习结果" items={learningResults} />
-            ) : null}
+          <div className="border-t border-zinc-200 p-3">
+            <CompactJson value={selectionPayload} />
           </div>
         </details>
       ) : null}
 
-      {hasAnalysis ? (
+      {Object.keys(analysisJson).length > 0 ? (
         <details className="rounded-md border border-zinc-200 bg-white">
           <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
-            逆向分析 JSON
+            选中 Enroute profile JSON
           </summary>
           <div className="border-t border-zinc-200 p-3">
             <CompactJson value={analysisJson} />
@@ -1863,10 +2823,123 @@ function EnrouteNodePanel({
       {hasRaw ? (
         <details className="rounded-md border border-zinc-200 bg-white">
           <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
-            Enroute 原始结果
+            风格选择原始结果
           </summary>
           <div className="border-t border-zinc-200 p-3">
-            <CompactJson value={{ reference, analysis }} />
+            <CompactJson value={selection} />
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function WearingPromptPanel({
+  result,
+  loading,
+  activeAction,
+  onRetry,
+}: {
+  result: Record<string, unknown>;
+  loading: boolean;
+  activeAction: ActionKey | null;
+  onRetry: () => void;
+}) {
+  const selectedModel = resolvedSelectedModel(result);
+  const inputImages = arrayValue(result.input_images)
+    .map((item) => stringValue(item))
+    .filter(Boolean);
+  const prompt = stringValue(result.prompt);
+  const enrouteImagePath = stringValue(result.enroute_reference_image_path);
+  const hasRaw = Object.keys(result).length > 0;
+  const disabled = loading || !hasRaw;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">
+        <div>
+          <p className="text-sm font-medium">提示词操作</p>
+          <p className="mt-1 text-xs text-zinc-500">
+            {hasRaw ? "从当前节点重新编排提示词并继续生图。" : "提示词编排完成后可重试。"}
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          onClick={onRetry}
+          disabled={disabled}
+          loading={activeAction === "retry-compile-prompt"}
+          loadingText="提交中"
+          title={hasRaw ? "重编排提示词并重新生成穿戴图" : "提示词编排完成后可重试"}
+        >
+          <RefreshCcw className="h-4 w-4" />
+          重试提示词编排
+        </Button>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        <KeyValuePanel
+          title="编排结果"
+          rows={[
+            ["状态", result.status],
+            ["原因", result.reason],
+            ["产品 ID", result.product_id],
+            ["输入图数量", inputImages.length],
+            ["选择依据", result.selection_reason],
+          ]}
+        />
+        <KeyValuePanel
+          title="输入素材"
+          rows={[
+            ["标记主图", result.marked_main_image_path],
+            ["标记尺寸图", result.marked_size_reference_image_path],
+            ["Enroute 参考图", result.enroute_reference_image_path],
+            ["模特", selectedModel.name || selectedModel.profile_key],
+            ["模特图", selectedModel.image_path],
+          ]}
+        />
+      </div>
+
+      {inputImages.length > 0 || enrouteImagePath ? (
+        <div>
+          <p className="mb-2 text-xs font-medium text-zinc-500">生图输入素材</p>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {inputImages.map((path, index) => (
+              <ImagePreview
+                key={`${index}-${path}`}
+                label={`输入图 ${index + 1}`}
+                path={path}
+                url={imageDisplayUrl(path)}
+              />
+            ))}
+            {enrouteImagePath ? (
+              <ImagePreview
+                label="Enroute profile 参考"
+                path={enrouteImagePath}
+                url={imageDisplayUrl(enrouteImagePath)}
+              />
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {prompt ? (
+        <div className="space-y-2">
+          <label className="text-xs font-medium text-zinc-500">编排后的完整提示词</label>
+          <Textarea
+            className="min-h-72 font-mono text-xs leading-relaxed"
+            value={prompt}
+            readOnly
+          />
+        </div>
+      ) : null}
+
+      {hasRaw ? (
+        <details className="rounded-md border border-zinc-200 bg-white">
+          <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
+            生图提示词编排原始结果
+          </summary>
+          <div className="border-t border-zinc-200 p-3">
+            <CompactJson value={result} />
           </div>
         </details>
       ) : null}
@@ -1916,6 +2989,58 @@ function EnrouteRecordList({
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function LearningReferenceList({
+  title,
+  items,
+}: {
+  title: string;
+  items: EnrouteLearningItem[];
+}) {
+  return (
+    <div className="rounded-md border border-zinc-200 bg-white p-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-medium">{title}</p>
+        <Badge variant="secondary">{items.length} 张</Badge>
+      </div>
+      <div className="grid gap-2 md:grid-cols-2">
+        {items.map((item) => (
+          <div
+            key={item.enroute_product_id}
+            className={`rounded-md border p-2 text-sm ${
+              item.status === "failed"
+                ? "border-red-200 bg-red-50/60"
+                : item.status === "learning"
+                  ? "border-amber-200 bg-amber-50/60"
+                  : "border-zinc-200 bg-zinc-50"
+            }`}
+          >
+            <div className="mb-1 flex items-start justify-between gap-2">
+              <p className="min-w-0 break-words font-medium">
+                {item.enroute_title || item.enroute_product_id}
+              </p>
+              <Badge variant={learningStatusBadgeVariant(item.status)}>
+                {learningStatusLabel(item.status)}
+              </Badge>
+            </div>
+            <p className="break-all font-mono text-xs text-zinc-500">
+              {item.enroute_product_id}
+            </p>
+            <div className="mt-2 grid gap-1 text-xs text-zinc-600">
+              <span>尝试次数：{displayValue(item.learning_attempts)}</span>
+              <span>学习时间：{formatTimestamp(item.learned_at)}</span>
+              {item.last_error ? (
+                <span className="break-words text-red-700">
+                  错误：{item.last_error}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -2100,23 +3225,39 @@ function buildGrsaiReview(state: unknown): GrsaiReview {
   const root = asRecord(state);
   const values = asRecord(root.values);
   const wearing = asRecord(values.wearing_image_result);
+  const wearingPrompt = asRecord(values.wearing_generation_prompt_result);
   const manualReview = latestManualReviewPayload(root, values);
-  const selectedModelProfile = asRecord(
-    wearing.selected_model_profile || manualReview.selected_model_profile,
-  );
+  const selectedModelFromWearing = resolvedSelectedModel(wearing);
+  const selectedModelFromPrompt = resolvedSelectedModel(wearingPrompt);
+  const selectedModelProfile = Object.keys(selectedModelFromWearing).length
+    ? selectedModelFromWearing
+    : Object.keys(selectedModelFromPrompt).length
+      ? selectedModelFromPrompt
+      : asRecord(manualReview.selected_model_profile);
   const imageGeneration = asRecord(wearing.image_generation);
   const imageMap = new Map<string, ReviewImage>();
 
-  addReviewImage(imageMap, "主图", stringValue(wearing.marked_main_image_path));
+  addReviewImage(
+    imageMap,
+    "主图",
+    stringValue(wearing.marked_main_image_path || wearingPrompt.marked_main_image_path),
+  );
   addReviewImage(
     imageMap,
     "尺寸参考图",
-    stringValue(wearing.marked_size_reference_image_path),
+    stringValue(
+      wearing.marked_size_reference_image_path ||
+        wearingPrompt.marked_size_reference_image_path,
+    ),
   );
   addReviewImage(
     imageMap,
     "Enroute 参考图",
-    stringValue(wearing.enroute_reference_image_path || manualReview.enroute_reference_image_path),
+    stringValue(
+      wearing.enroute_reference_image_path ||
+        wearingPrompt.enroute_reference_image_path ||
+        manualReview.enroute_reference_image_path,
+    ),
   );
   addReviewImage(
     imageMap,
@@ -2124,13 +3265,17 @@ function buildGrsaiReview(state: unknown): GrsaiReview {
     stringValue(selectedModelProfile.image_path),
   );
 
-  const inputImages = Array.isArray(wearing.input_images) ? wearing.input_images : [];
+  const inputImages = Array.isArray(wearing.input_images)
+    ? wearing.input_images
+    : Array.isArray(wearingPrompt.input_images)
+      ? wearingPrompt.input_images
+      : [];
   inputImages.forEach((item, index) => {
     addReviewImage(imageMap, `输入图 ${index + 1}`, stringValue(item));
   });
 
   return {
-    prompt: stringValue(wearing.prompt || manualReview.prompt),
+    prompt: stringValue(wearing.prompt || wearingPrompt.prompt || manualReview.prompt),
     generatedImagePath: stringValue(
       wearing.generated_image_path || manualReview.generated_image_path,
     ),
@@ -2140,6 +3285,88 @@ function buildGrsaiReview(state: unknown): GrsaiReview {
     images: Array.from(imageMap.values()),
     imageGeneration,
   };
+}
+
+function buildAiCallsFromState(state: unknown): AiCallSummary[] {
+  const root = asRecord(state);
+  const values = asRecord(root.values);
+  const checkpoints = asRecord(values.ai_checkpoints);
+  return Object.entries(checkpoints).map(([key, checkpointValue]) => {
+    const checkpoint = asRecord(checkpointValue);
+    const input = asRecord(checkpoint.input);
+    const result = asRecord(checkpoint.result);
+    const runtime = asRecord(input._runtime);
+    return {
+      key,
+      label: fallbackAiCallLabel(key),
+      kind: stringValue(checkpoint.type) || (key.startsWith("generate_wearing_image") ? "image_ai" : "llm"),
+      status: stringValue(checkpoint.status || result.status),
+      source: stringValue(checkpoint.source),
+      attempt_count:
+        typeof checkpoint.attempt_count === "number" ? checkpoint.attempt_count : null,
+      input_hash: stringValue(checkpoint.input_hash),
+      model: stringValue(runtime.model),
+      providers: arrayValue(runtime.providers).map(asRecord),
+      prompts: asRecord(runtime.prompts),
+      input,
+      output: result,
+      images: collectAiCallImages(key, input, result),
+      raw_checkpoint: checkpoint,
+    };
+  });
+}
+
+function collectAiCallImages(
+  key: string,
+  input: Record<string, unknown>,
+  output: Record<string, unknown>,
+) {
+  const images: Array<{ label: string; path: string; role: string }> = [];
+  const seen = new Set<string>();
+  function add(label: string, path: unknown, role = "input") {
+    const value = stringValue(path).trim();
+    if (!value || seen.has(value)) {
+      return;
+    }
+    seen.add(value);
+    images.push({ label, path: value, role });
+  }
+  add("检测拼图", input.collage_path);
+  add("Enroute 学习图", input.reference_image_path);
+  add("产品主图", input.main_image_path);
+  add("尺寸参考图", input.size_reference_image_path);
+  add("Enroute profile 图", output.enroute_reference_image_path || output.reference_image_path, "context");
+  add("生成结果", output.generated_image_path || output.generated_image_url, "output");
+
+  const promptInput = asRecord(input.wearing_generation_prompt_result);
+  arrayValue(promptInput.input_images || output.input_images).forEach((path, index) => {
+    add(
+      key.startsWith("generate_wearing_image")
+        ? `Grsai 输入图 ${index + 1}`
+        : `Prompt 输入图 ${index + 1}`,
+      path,
+    );
+  });
+  return images;
+}
+
+function fallbackAiCallLabel(key: string) {
+  if (key === "detect_size_reference") {
+    return "LLM 产品合格性检测";
+  }
+  if (key.startsWith("learn_enroute_reference")) {
+    return "LLM 学习 Enroute profile";
+  }
+  if (key === "select_wearing_style_profile") {
+    return "LLM 选择风格与模特";
+  }
+  if (key === "compile_wearing_generation_prompt") {
+    return "LLM 编排生图提示词";
+  }
+  if (key.startsWith("generate_wearing_image")) {
+    return "图片 AI 生成穿戴图";
+  }
+  return key;
 }
 
 function latestManualReviewPayload(
@@ -2244,11 +3471,16 @@ function ProgressPanel({
 }) {
   const activeRun = asRecord(progress?.active_run);
   const tasks = Array.isArray(progress?.tasks) ? progress.tasks : [];
-  const running = Boolean(progress?.running || threadStatus === "busy");
+  const running = Boolean(progress?.running);
+  const queued = Boolean(progress?.queued || progress?.status === "pending");
   return (
     <div
       className={`rounded-md border p-3 ${
-        running ? "border-emerald-200 bg-emerald-50" : "border-zinc-200 bg-white"
+        running
+          ? "border-emerald-200 bg-emerald-50"
+          : queued
+            ? "border-amber-200 bg-amber-50"
+            : "border-zinc-200 bg-white"
       }`}
     >
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -2258,7 +3490,7 @@ function ProgressPanel({
             {progress?.message || "暂无运行进度。"}
           </p>
         </div>
-        <Badge variant={running ? "success" : "secondary"}>
+        <Badge variant={running ? "success" : queued ? "warning" : "secondary"}>
           {progress?.status_label || threadStatusLabel(threadStatus)}
         </Badge>
       </div>
@@ -2350,11 +3582,27 @@ function actionNotice(result: Record<string, unknown>) {
       typeof result.products_reset === "number" ? result.products_reset : 0;
     return `已清理 ${deletedThreads} 个 flow，同步恢复 ${productsReset} 个商品。`;
   }
+  if (result.mode === "stop_flow") {
+    const cancelledRuns =
+      typeof result.cancelled_runs === "number" ? result.cancelled_runs : 0;
+    return `已停止 ${cancelledRuns} 个活跃 run。`;
+  }
+  if (result.mode === "delete_flow") {
+    const deletedThreads =
+      typeof result.deleted_threads === "number" ? result.deleted_threads : 0;
+    const productsReset =
+      typeof result.products_reset === "number" ? result.products_reset : 0;
+    return `已删除 ${deletedThreads} 个 flow，同步恢复 ${productsReset} 个商品。`;
+  }
   return "";
 }
 
 function shouldAutoSelectResultThread(result: Record<string, unknown>) {
-  if (result.mode === "resume_required") {
+  if (
+    result.mode === "resume_required" ||
+    result.mode === "stop_flow" ||
+    result.mode === "delete_flow"
+  ) {
     return false;
   }
   return typeof result.thread_id === "string";
@@ -2396,10 +3644,18 @@ function StatePanel({ state }: { state: unknown }) {
   const values = asRecord(root.values);
   const product = asRecord(values.selected_product);
   const rawdata = asRecord(product.rawdata);
+  const mainImage = asRecord(values.main_image_result);
   const wearing = asRecord(values.wearing_image_result);
   const sizeReference = asRecord(values.size_reference_result);
   const enrouteReference = asRecord(values.enroute_reference_result);
   const enrouteAnalysis = asRecord(values.enroute_analysis_result);
+  const enrouteLearning = asRecord(values.enroute_learning_result);
+  const wearingStyleSelectionRaw = asRecord(values.wearing_style_selection_result);
+  const wearingStyleSelection = Object.keys(wearingStyleSelectionRaw).length
+    ? wearingStyleSelectionRaw
+    : enrouteAnalysis;
+  const wearingPrompt = asRecord(values.wearing_generation_prompt_result);
+  const selectedModel = resolvedSelectedModel(wearingStyleSelection);
   const manualReview = asRecord(values.manual_review_request);
   const metrics = asRecord(values.metrics);
   const checkpoints = asRecord(values.ai_checkpoints);
@@ -2454,21 +3710,23 @@ function StatePanel({ state }: { state: unknown }) {
           ]}
         />
         <KeyValuePanel
-          title="穿戴图"
+          title="准备主图"
           rows={[
-            ["状态", wearing.status],
-            ["原因", wearing.reason],
-            ["生成图", wearing.generated_image_path],
-            ["Attempt", wearing.attempt],
+            ["状态", mainImage.status],
+            ["合图", mainImage.path],
+            ["图片数量", mainImage.source_image_count],
+            ["临时文件", mainImage.temporary],
           ]}
         />
       </div>
 
       <div className="grid gap-3 md:grid-cols-2">
         <KeyValuePanel
-          title="尺寸检测"
+          title="产品合格性检测"
           rows={[
             ["状态", sizeReference.status],
+            ["产品合格", sizeReference.is_product_qualified],
+            ["失败项", sizeReference.failed_checks],
             ["可判断尺寸", sizeReference.can_judge_size],
             ["尺寸参考图编号", sizeReference.size_reference_image_number],
             ["主图编号", sizeReference.main_image_number],
@@ -2476,17 +3734,61 @@ function StatePanel({ state }: { state: unknown }) {
           ]}
         />
         <KeyValuePanel
-          title="Enroute / 模特"
+          title="Enroute 参考选择"
           rows={[
-            ["参考图状态", enrouteReference.status],
-            ["分析状态", enrouteAnalysis.status],
-            ["参考图", enrouteAnalysis.reference_image_path],
-            [
-              "模特",
-              asRecord(asRecord(enrouteAnalysis.analysis).selected_model_profile).name ||
-                asRecord(asRecord(enrouteAnalysis.analysis).selected_model_profile)
-                  .profile_key,
-            ],
+            ["状态", enrouteReference.status],
+            ["类目", enrouteReference.category],
+            ["参考图数量", enrouteReference.reference_count],
+            ["未学习数量", enrouteReference.unlearned_count],
+            ["本次学习", enrouteReference.learning_count],
+            ["选中参考图", enrouteReference.selected_image_path],
+          ]}
+        />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <KeyValuePanel
+          title="Enroute profile 学习"
+          rows={[
+            ["状态", enrouteLearning.status],
+            ["类目", enrouteLearning.category],
+            ["本次学习", enrouteLearning.learning_count],
+            ["学习后缓存", enrouteLearning.cached_analysis_count_after_learning],
+            ["原因", enrouteLearning.reason],
+          ]}
+        />
+        <KeyValuePanel
+          title="风格与模特"
+          rows={[
+            ["状态", wearingStyleSelection.status],
+            ["Enroute", wearingStyleSelection.enroute_product_id],
+            ["参考图", wearingStyleSelection.reference_image_path],
+            ["模特", selectedModel.name || selectedModel.profile_key],
+            ["选择依据", asRecord(wearingStyleSelection.selection).reason],
+          ]}
+        />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <KeyValuePanel
+          title="生图提示词"
+          rows={[
+            ["状态", wearingPrompt.status],
+            ["原因", wearingPrompt.reason],
+            ["输入图数量", arrayValue(wearingPrompt.input_images).length],
+            ["提示词长度", stringValue(wearingPrompt.prompt).length],
+            ["标记主图", wearingPrompt.marked_main_image_path],
+            ["标记尺寸图", wearingPrompt.marked_size_reference_image_path],
+          ]}
+        />
+        <KeyValuePanel
+          title="穿戴图"
+          rows={[
+            ["状态", wearing.status],
+            ["原因", wearing.reason],
+            ["生成图", wearing.generated_image_path],
+            ["Attempt", wearing.attempt],
+            ["Grsai 任务", asRecord(wearing.image_generation).id],
           ]}
         />
       </div>
@@ -2699,7 +4001,6 @@ function ImageValuePreview({
 function CompactJson({ value }: { value: unknown }) {
   return (
     <div className="space-y-3">
-      <JsonImagePreviewStrip value={value} compact />
       <pre className="max-h-80 overflow-auto rounded-md bg-zinc-950 p-3 text-xs leading-relaxed text-zinc-50">
         {JSON.stringify(value, null, 2)}
       </pre>
@@ -2711,45 +4012,10 @@ function JsonViewer({ title, value }: { title?: string; value: unknown }) {
   return (
     <div>
       {title ? <p className="mb-2 text-sm font-medium">{title}</p> : null}
-      <JsonImagePreviewStrip value={value} />
       <pre className="max-h-[520px] overflow-auto rounded-md border border-zinc-200 bg-zinc-950 p-3 text-xs leading-relaxed text-zinc-50">
         {JSON.stringify(value, null, 2)}
       </pre>
     </div>
-  );
-}
-
-function JsonImagePreviewStrip({
-  value,
-  compact = false,
-}: {
-  value: unknown;
-  compact?: boolean;
-}) {
-  const images = collectImageReferences(value);
-  if (images.length === 0) {
-    return null;
-  }
-  return (
-    <details open className="rounded-md border border-zinc-200 bg-white">
-      <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
-        图片字段 ({images.length})
-      </summary>
-      <div className="grid gap-3 border-t border-zinc-200 p-3 md:grid-cols-2 xl:grid-cols-3">
-        {images.map((image) => (
-          <div key={`${image.label}-${image.path}`} className="min-w-0">
-            <p className="mb-2 truncate text-xs font-medium text-zinc-500">
-              {image.label}
-            </p>
-            <ImageValuePreview
-              label={image.label}
-              path={image.path}
-              compact={compact}
-            />
-          </div>
-        ))}
-      </div>
-    </details>
   );
 }
 
@@ -2759,8 +4025,164 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function productSourceUrl(thread: WorkflowThread, state: unknown): string {
+  const root = asRecord(state);
+  const values = asRecord(root.values);
+  const product = asRecord(values.selected_product);
+  const rawdata = asRecord(product.rawdata);
+  const directUrl =
+    stringValue(rawdata.url) ||
+    stringValue(rawdata.requested_url) ||
+    stringValue(rawdata.product_url) ||
+    stringValue(thread.summary.product_url);
+  if (isHttpUrl(directUrl)) {
+    return directUrl;
+  }
+
+  const platform = stringValue(product.platform || thread.summary.platform).toLowerCase();
+  const productId = stringValue(product.product_id || thread.summary.product_id);
+  if (platform.includes("1688") && productId) {
+    return `https://detail.1688.com/offer/${encodeURIComponent(productId)}.html`;
+  }
+  return "";
+}
+
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+function resolvedSelectedModel(value: unknown): Record<string, unknown> {
+  const record = asRecord(value);
+  const direct = asRecord(record.selected_model_profile);
+  if (Object.keys(direct).length > 0) {
+    return direct;
+  }
+  return asRecord(asRecord(record.analysis).selected_model_profile);
+}
+
 function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+function countByStatus(
+  statuses: Array<{ status: string; count: number }>,
+  targetStatus: string,
+): number {
+  return statuses.find((item) => item.status === targetStatus)?.count ?? 0;
+}
+
+type LearningStatusCounts = {
+  pending: number;
+  learning: number;
+  learned: number;
+  failed: number;
+};
+
+function emptyLearningStatusCounts(): LearningStatusCounts {
+  return {
+    pending: 0,
+    learning: 0,
+    learned: 0,
+    failed: 0,
+  };
+}
+
+function countLearningItemsByStatus(items: EnrouteLearningItem[]): LearningStatusCounts {
+  const counts = emptyLearningStatusCounts();
+  for (const item of items) {
+    if (item.status === "pending") {
+      counts.pending += 1;
+    } else if (item.status === "learning") {
+      counts.learning += 1;
+    } else if (item.status === "learned") {
+      counts.learned += 1;
+    } else if (item.status === "failed") {
+      counts.failed += 1;
+    }
+  }
+  return counts;
+}
+
+function learningRowsForCategory(
+  category: string,
+  learning: EnrouteLearningResponse | null,
+): EnrouteLearningItem[] {
+  if (!category || !learning) {
+    return [];
+  }
+  return learning.items.filter((item) => item.enroute_category === category);
+}
+
+function learningRowsForReferencePlan(
+  reference: Record<string, unknown>,
+  learning: EnrouteLearningResponse | null,
+): EnrouteLearningItem[] {
+  if (!learning) {
+    return [];
+  }
+  const ids = new Set<string>();
+  for (const item of arrayValue(reference.learning_reference_rows)) {
+    const record = asRecord(item);
+    const id = stringValue(record.enroute_product_id || record.product_id);
+    if (id) {
+      ids.add(id);
+    }
+  }
+  for (const item of arrayValue(reference.learning_references)) {
+    const record = asRecord(item);
+    const id = stringValue(record.enroute_product_id || record.product_id);
+    if (id) {
+      ids.add(id);
+    }
+  }
+  if (ids.size === 0) {
+    return [];
+  }
+  return learning.items
+    .filter((item) => ids.has(item.enroute_product_id))
+    .sort(compareLearningItems);
+}
+
+function compareLearningItems(a: EnrouteLearningItem, b: EnrouteLearningItem): number {
+  const statusOrder: Record<string, number> = {
+    learning: 0,
+    failed: 1,
+    pending: 2,
+    learned: 3,
+  };
+  const statusDiff =
+    (statusOrder[a.status] ?? 9) - (statusOrder[b.status] ?? 9);
+  if (statusDiff !== 0) {
+    return statusDiff;
+  }
+  return a.enroute_product_id.localeCompare(b.enroute_product_id);
+}
+
+function learningStatusBadgeVariant(
+  status: unknown,
+): "secondary" | "success" | "warning" | "danger" {
+  const value = stringValue(status);
+  if (value === "learned") {
+    return "success";
+  }
+  if (value === "learning") {
+    return "warning";
+  }
+  if (value === "failed") {
+    return "danger";
+  }
+  return "secondary";
+}
+
+function learningStatusLabel(status: unknown): string {
+  const value = stringValue(status);
+  const labels: Record<string, string> = {
+    pending: "待学习",
+    learning: "学习中",
+    learned: "已学习",
+    failed: "失败",
+  };
+  return labels[value] ?? displayValue(value);
 }
 
 function imagePathFromValue(label: string, value: unknown): string {
@@ -2789,60 +4211,6 @@ function looksLikeImageReference(label: string, text: string): boolean {
 
 function hasImageExtension(text: string): boolean {
   return /\.(png|jpe?g|webp|gif|bmp|avif|svg)(\?.*)?$/i.test(text);
-}
-
-function collectImageReferences(value: unknown) {
-  const results: Array<{ label: string; path: string }> = [];
-  const seenObjects = new Set<object>();
-  const seenPaths = new Set<string>();
-  collectImageReferencesInner(value, "", results, seenObjects, seenPaths);
-  return results;
-}
-
-function collectImageReferencesInner(
-  value: unknown,
-  label: string,
-  results: Array<{ label: string; path: string }>,
-  seenObjects: Set<object>,
-  seenPaths: Set<string>,
-) {
-  if (results.length >= 24) {
-    return;
-  }
-  const imagePath = imagePathFromValue(label, value);
-  if (imagePath && !seenPaths.has(imagePath)) {
-    seenPaths.add(imagePath);
-    results.push({ label: label || "图片", path: imagePath });
-    return;
-  }
-  if (!value || typeof value !== "object") {
-    return;
-  }
-  if (seenObjects.has(value)) {
-    return;
-  }
-  seenObjects.add(value);
-  if (Array.isArray(value)) {
-    value.forEach((item, index) =>
-      collectImageReferencesInner(
-        item,
-        label ? `${label}[${index}]` : `[${index}]`,
-        results,
-        seenObjects,
-        seenPaths,
-      ),
-    );
-    return;
-  }
-  Object.entries(value as Record<string, unknown>).forEach(([key, child]) => {
-    collectImageReferencesInner(
-      child,
-      label ? `${label}.${key}` : key,
-      results,
-      seenObjects,
-      seenPaths,
-    );
-  });
 }
 
 function displayValue(value: unknown): string {

@@ -199,7 +199,12 @@ def test_restart_workflow_prefers_interrupted_thread_without_resume(
                         "type": "wearing_image_review",
                         "generated_image_path": "data/products/1688/p1/wearing.png",
                         "attempt": 1,
-                        "options": ["approve", "regenerate", "reject"],
+                        "options": [
+                            "approve",
+                            "regenerate",
+                            "recompile_prompt",
+                            "reject",
+                        ],
                     },
                 }
             ],
@@ -253,7 +258,12 @@ def test_restart_workflow_resumes_interrupted_thread_when_payload_is_given(
                     "id": "interrupt-1",
                     "value": {
                         "type": "wearing_image_review",
-                        "options": ["approve", "regenerate", "reject"],
+                        "options": [
+                            "approve",
+                            "regenerate",
+                            "recompile_prompt",
+                            "reject",
+                        ],
                     },
                 }
             ],
@@ -395,7 +405,7 @@ def test_restart_workflow_with_selected_thread_does_not_switch_to_other_thread(
     assert result["thread_id"] == "thread-stale"
     assert result["run_id"] == "run-retry"
     assert "普通节点重试" in result["message"]
-    assert result["summary"]["stop_reason"] == "尺寸检测失败"
+    assert result["summary"]["stop_reason"] == "产品合格性检测失败"
     assert posts == [
         (
             "/threads/thread-stale/runs",
@@ -419,7 +429,7 @@ def test_thread_summary_prefers_task_error_over_stale_failed_state() -> None:
                 },
                 "size_reference_result": {
                     "status": "failed",
-                    "reason": "历史尺寸检测失败",
+                    "reason": "历史产品合格性检测失败",
                 },
             },
             "next": ["detect_size_reference"],
@@ -468,6 +478,35 @@ def test_thread_progress_summarizes_running_node() -> None:
     assert progress["phase_label"] == "生成穿戴图"
     assert progress["active_run"]["run_id"] == "run-1"
     assert "第三方图片接口" in progress["message"]
+
+
+def test_thread_progress_shows_queued_run_without_pending_node() -> None:
+    state = {"values": {}, "next": [], "tasks": []}
+    runs = [
+        {
+            "run_id": "run-pending",
+            "status": "pending",
+            "created_at": "2026-06-26T05:00:00+00:00",
+            "updated_at": "2026-06-26T05:01:00+00:00",
+            "multitask_strategy": "reject",
+        }
+    ]
+
+    summary = cli._summarize_thread_state(state, runs=runs)
+    progress = cli._summarize_thread_progress(
+        state=state,
+        thread={"status": "busy"},
+        runs=runs,
+    )
+
+    assert summary["current_node_label"] == "等待 worker 执行"
+    assert summary["stop_reason_code"] == "run_queued"
+    assert summary["stop_reason"] == "排队中"
+    assert progress["running"] is False
+    assert progress["queued"] is True
+    assert progress["status"] == "pending"
+    assert progress["status_label"] == "等待中"
+    assert "等待 LangGraph worker" in progress["message"]
 
 
 def test_thread_progress_shows_manual_review_instead_of_completed() -> None:

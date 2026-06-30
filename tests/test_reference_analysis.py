@@ -4,9 +4,11 @@ import productv2.reference_analysis_service as service_module
 from productv2.reference_analysis_service import (
     build_enroute_analysis_selection_payload,
     build_enroute_reference_analysis_payload,
+    build_wearing_style_selection_payload,
     format_model_profile_options,
     parse_enroute_analysis_selection,
     parse_enroute_reference_analysis,
+    parse_wearing_style_profile_selection,
 )
 
 
@@ -18,6 +20,10 @@ def test_reference_analysis_module_reexports_service_layer() -> None:
     assert (
         compatibility_module.build_enroute_reference_analysis_payload
         is service_module.build_enroute_reference_analysis_payload
+    )
+    assert (
+        compatibility_module.select_wearing_style_profile
+        is service_module.select_wearing_style_profile
     )
 
 
@@ -94,6 +100,41 @@ def test_parse_enroute_reference_analysis_cleans_instruction_lists() -> None:
     assert analysis.scene_style.background_feel == "简洁、低干扰"
 
 
+def test_parse_current_enroute_reference_analysis_keeps_legacy_valid_flag_unset() -> None:
+    analysis = parse_enroute_reference_analysis(
+        """
+        {
+          "is_valid_human_reference": true,
+          "analysis_scope": {
+            "task": "photographic_reverse_profile_only"
+          },
+          "observed_facts": {
+            "composition_observation": {
+              "shot_type": "collarbone crop",
+              "crop_boundaries": "裁到锁骨区域"
+            }
+          },
+          "estimated_shooting_profile": {
+            "camera_estimate": {
+              "shot_size_estimate": {
+                "estimate": "近景",
+                "confidence": "medium",
+                "evidence": "锁骨区域占画面主体"
+              }
+            }
+          },
+          "transfer_notes": {
+            "stable_reference_features": ["锁骨区域近景构图"]
+          }
+        }
+        """
+    )
+
+    assert analysis.is_valid_human_reference is True
+    assert analysis.is_valid_wearing_reference is None
+    assert analysis.summary
+
+
 def test_build_enroute_reference_analysis_payload_uses_responses_vision() -> None:
     payload = build_enroute_reference_analysis_payload(
         Settings(
@@ -120,22 +161,21 @@ def test_build_enroute_reference_analysis_payload_uses_responses_vision() -> Non
     user_content = payload["input"][1]["content"]
     assert payload["input"][0]["role"] == "system"
     assert system_content[0]["type"] == "input_text"
-    assert "Enroute Jewelry" in system_content[0]["text"]
-    assert "clothing_style" in system_content[0]["text"]
-    assert "scene_style" in system_content[0]["text"]
-    assert "shooting_style" in system_content[0]["text"]
-    assert "selected_model_profile" in system_content[0]["text"]
-    assert "makeup_style" in system_content[0]["text"]
+    assert "photographic_reverse_profile_only" in system_content[0]["text"]
+    assert "observed_facts" in system_content[0]["text"]
+    assert "estimated_shooting_profile" in system_content[0]["text"]
+    assert "confidence_and_limits" in system_content[0]["text"]
+    assert "transfer_notes" in system_content[0]["text"]
+    assert "禁止输出任何直接生图指令" in system_content[0]["text"]
+    assert "不得输出最终生图 prompt" in system_content[0]["text"]
+    assert "selected_model_profile" not in system_content[0]["text"]
     assert "lip_makeup" not in system_content[0]["text"]
     assert "nail_style" not in system_content[0]["text"]
-    assert "嘴唇" in system_content[0]["text"]
-    assert "美甲" in system_content[0]["text"]
-    assert "不要把嘴唇或美甲作为重点" in system_content[0]["text"]
-    assert "romantic_rebel_european" in system_content[0]["text"]
-    assert "/tmp/model.jpg" in system_content[0]["text"]
+    assert "makeup_transfer_policy" in system_content[0]["text"]
+    assert "romantic_rebel_european" not in system_content[0]["text"]
+    assert "/tmp/model.jpg" not in system_content[0]["text"]
     assert "product_context" not in system_content[0]["text"]
     assert "age_sense" not in system_content[0]["text"]
-    assert "hair_style" not in system_content[0]["text"]
     assert "generation_instructions" not in system_content[0]["text"]
     assert "negative_instructions" not in system_content[0]["text"]
     assert user_content[1] == {
@@ -221,3 +261,69 @@ def test_parse_enroute_analysis_selection_reads_minimal_json() -> None:
 
     assert selection.selected_enroute_product_id == "necklaces:short"
     assert selection.reason == "当前尺寸参考更接近短链构图"
+
+
+def test_build_wearing_style_selection_payload_puts_profiles_in_system_prompt() -> None:
+    payload = build_wearing_style_selection_payload(
+        Settings(
+            openai_model="gpt-test",
+            enroute_analysis_temperature=0.7,
+            enroute_analysis_top_p=0.8,
+        ),
+        "data:image/jpeg;base64,main",
+        "data:image/jpeg;base64,size",
+        [
+            {
+                "enroute_product_id": "necklaces:short",
+                "summary": "锁骨区域构图明确，适合短链。",
+            }
+        ],
+        [
+            {
+                "profile_key": "romantic_rebel_european",
+                "name": "Romantic Rebel",
+                "summary": "冷静松弛，适合锁骨链。",
+            }
+        ],
+    )
+
+    system_text = payload["input"][0]["content"][0]["text"]
+    user_content = payload["input"][1]["content"]
+
+    assert payload["model"] == "gpt-test"
+    assert payload["stream"] is True
+    assert payload["temperature"] == 0.7
+    assert payload["top_p"] == 0.8
+    assert "Enroute profile 摘要列表" in system_text
+    assert "固定模特 profile 摘要列表" in system_text
+    assert "selected_enroute_product_id" in system_text
+    assert "selected_model_profile_key" in system_text
+    assert "necklaces:short" in system_text
+    assert "romantic_rebel_european" in system_text
+    assert user_content[0]["type"] == "input_text"
+    assert user_content[1] == {
+        "type": "input_image",
+        "image_url": "data:image/jpeg;base64,main",
+        "detail": "high",
+    }
+    assert user_content[2] == {
+        "type": "input_image",
+        "image_url": "data:image/jpeg;base64,size",
+        "detail": "high",
+    }
+
+
+def test_parse_wearing_style_profile_selection_reads_minimal_json() -> None:
+    selection = parse_wearing_style_profile_selection(
+        """
+        {
+          "selected_enroute_product_id": "necklaces:short",
+          "selected_model_profile_key": "romantic_rebel_european",
+          "reason": "短链构图和模特气质匹配"
+        }
+        """
+    )
+
+    assert selection.selected_enroute_product_id == "necklaces:short"
+    assert selection.selected_model_profile_key == "romantic_rebel_european"
+    assert selection.reason == "短链构图和模特气质匹配"

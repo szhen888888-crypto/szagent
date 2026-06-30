@@ -11,6 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
@@ -30,11 +31,14 @@ from productv2.config import PROJECT_ROOT
 from productv2.config import Settings
 from productv2.db import RAW_IMPORT_STATUS
 from productv2.db import clear_enroute_image_analyses
+from productv2.db import clear_enroute_learning_references
 from productv2.db import get_product_by_identity
 from productv2.db import list_enroute_image_analyses
+from productv2.db import list_enroute_learning_references
 from productv2.db import update_product_fields
 from productv2.feishu_long_connection import FeishuLongConnectionServer
 from productv2.feishu_long_connection import list_feishu_event_log
+from productv2.manual_review import MANUAL_REVIEW_ACTIONS
 from productv2.manual_review import manual_review_payload_from_state
 from productv2.model_profiles import VIRTUAL_MODEL_PROFILES
 from productv2.model_profiles import virtual_model_profile_summary
@@ -89,6 +93,7 @@ class StartServerRequest(BaseModel):
     port: int = DEFAULT_LANGGRAPH_PORT
     allow_blocking: bool = True
     no_browser: bool = True
+    no_reload: bool = True
 
 
 class WorkflowStartRequest(BaseModel):
@@ -114,10 +119,20 @@ class ClearFlowsRequest(BaseModel):
     reset_status: str = RAW_IMPORT_STATUS
 
 
+class StopThreadRequest(BaseModel):
+    api_url: str = DEFAULT_LANGGRAPH_API_URL
+
+
 class ResumeThreadRequest(BaseModel):
     api_url: str = DEFAULT_LANGGRAPH_API_URL
     assistant_id: str = DEFAULT_ASSISTANT_ID
     resume: Any = Field(default_factory=dict)
+
+
+class RetryNodeRequest(BaseModel):
+    api_url: str = DEFAULT_LANGGRAPH_API_URL
+    assistant_id: str = DEFAULT_ASSISTANT_ID
+    node: str
 
 
 class PromptSaveRequest(BaseModel):
@@ -202,6 +217,8 @@ def start_server(payload: StartServerRequest) -> dict[str, Any]:
         command.append("--allow-blocking")
     if payload.no_browser:
         command.append("--no-browser")
+    if payload.no_reload:
+        command.append("--no-reload")
 
     log_dir = PROJECT_ROOT / ".control"
     log_dir.mkdir(exist_ok=True)
@@ -278,6 +295,7 @@ def thread_state(
                 thread={"thread_id": thread_id},
                 runs=runs,
             ),
+            "ai_calls": _summarize_ai_calls_from_state(state),
         }
         database_product = _database_product_from_state(state)
         if database_product:
@@ -339,13 +357,25 @@ def model_profiles() -> dict[str, Any]:
 @app.get("/api/enroute-learning")
 def enroute_learning() -> dict[str, Any]:
     settings = Settings()
-    rows = list_enroute_image_analyses(settings.productv2_database_path)
+    rows = list_enroute_learning_references(settings.productv2_database_path)
+    analyses = {
+        str(row.get("enroute_product_id") or ""): row
+        for row in list_enroute_image_analyses(settings.productv2_database_path)
+    }
     categories: dict[str, int] = {}
+    statuses: dict[str, int] = {}
     items: list[dict[str, Any]] = []
     for row in rows:
         category = str(row.get("enroute_category") or "未分类")
+        status = str(row.get("status") or "unknown")
         categories[category] = categories.get(category, 0) + 1
-        analysis = row.get("analysis_json") if isinstance(row.get("analysis_json"), dict) else {}
+        statuses[status] = statuses.get(status, 0) + 1
+        analysis_row = analyses.get(str(row.get("enroute_product_id") or ""), {})
+        analysis = (
+            analysis_row.get("analysis_json")
+            if isinstance(analysis_row.get("analysis_json"), dict)
+            else {}
+        )
         selected_model = (
             analysis.get("selected_model_profile", {})
             if isinstance(analysis, dict)
@@ -354,6 +384,9 @@ def enroute_learning() -> dict[str, Any]:
         items.append(
             {
                 **row,
+                "analysis_id": analysis_row.get("id") or row.get("analysis_id"),
+                "analysis_json": analysis,
+                "summary": str(analysis_row.get("summary") or ""),
                 "analysis": analysis,
                 "selected_model_profile": (
                     selected_model if isinstance(selected_model, dict) else {}
@@ -366,6 +399,10 @@ def enroute_learning() -> dict[str, Any]:
             {"category": category, "count": count}
             for category, count in sorted(categories.items())
         ],
+        "statuses": [
+            {"status": status, "count": count}
+            for status, count in sorted(statuses.items())
+        ],
         "items": items,
     }
 
@@ -373,10 +410,17 @@ def enroute_learning() -> dict[str, Any]:
 @app.delete("/api/enroute-learning")
 def clear_enroute_learning() -> dict[str, Any]:
     settings = Settings()
-    result = clear_enroute_image_analyses(settings.productv2_database_path)
+    analysis_result = clear_enroute_image_analyses(settings.productv2_database_path)
+    reference_result = clear_enroute_learning_references(settings.productv2_database_path)
     return {
-        **result,
-        "message": f"已清理 {result['deleted_count']} 条 Enroute 逆向分析缓存。",
+        "deleted_count": analysis_result["deleted_count"],
+        "reference_deleted_count": reference_result["deleted_count"],
+        "total_before": analysis_result["total_before"],
+        "total_after": analysis_result["total_after"],
+        "message": (
+            f"已清理 {analysis_result['deleted_count']} 条 Enroute 逆向分析缓存，"
+            f"{reference_result['deleted_count']} 条学习参考记录。"
+        ),
     }
 
 
@@ -450,6 +494,35 @@ def clear_workflow_flows(payload: ClearFlowsRequest) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.post("/api/threads/{thread_id}/stop")
+def stop_thread_flow(thread_id: str, payload: StopThreadRequest) -> dict[str, Any]:
+    try:
+        return _stop_workflow_flow(
+            api_url=payload.api_url,
+            thread_id=thread_id,
+        )
+    except SystemExit as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.delete("/api/threads/{thread_id}")
+def delete_thread_flow(
+    thread_id: str,
+    api_url: str = Query(DEFAULT_LANGGRAPH_API_URL),
+    assistant_id: str = Query(DEFAULT_ASSISTANT_ID),
+    reset_status: str = Query(RAW_IMPORT_STATUS),
+) -> dict[str, Any]:
+    try:
+        return _delete_workflow_flow(
+            api_url=api_url,
+            assistant_id=assistant_id,
+            thread_id=thread_id,
+            reset_status=reset_status,
+        )
+    except SystemExit as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/api/threads/{thread_id}/resume")
 def resume_thread(thread_id: str, payload: ResumeThreadRequest) -> dict[str, Any]:
     if payload.resume is None:
@@ -460,6 +533,20 @@ def resume_thread(thread_id: str, payload: ResumeThreadRequest) -> dict[str, Any
             assistant_id=payload.assistant_id,
             thread_id=thread_id,
             resume_payload=payload.resume,
+        )
+    except SystemExit as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/threads/{thread_id}/retry-node")
+def retry_thread_node(thread_id: str, payload: RetryNodeRequest) -> dict[str, Any]:
+    if payload.node != "compile_wearing_generation_prompt":
+        raise HTTPException(status_code=400, detail="unsupported retry node")
+    try:
+        return _retry_compile_wearing_generation_prompt(
+            api_url=payload.api_url,
+            assistant_id=payload.assistant_id,
+            thread_id=thread_id,
         )
     except SystemExit as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -516,6 +603,62 @@ def _resume_thread(
     }
 
 
+def _retry_compile_wearing_generation_prompt(
+    *,
+    api_url: str,
+    assistant_id: str,
+    thread_id: str,
+) -> dict[str, Any]:
+    from productv2.cli import _api_get_json, _api_post_json, _studio_url
+
+    base_url = api_url.rstrip("/")
+    state = _api_get_json(base_url, f"/threads/{thread_id}/state")
+    values = state.get("values") if isinstance(state, dict) else {}
+    if not isinstance(values, dict):
+        values = {}
+    prompt_result = values.get("wearing_generation_prompt_result")
+    if not isinstance(prompt_result, dict) or not prompt_result:
+        raise SystemExit("当前 thread 没有可重试的生图提示词编排结果。")
+
+    update_values = {
+        "wearing_generation_prompt_result": {},
+        "wearing_image_result": {},
+        "manual_review_request": {},
+        "manual_review_decision": {"action": "recompile_prompt"},
+    }
+    state_update = _api_post_json(
+        base_url,
+        f"/threads/{thread_id}/state",
+        {
+            "values": update_values,
+            "as_node": "select_wearing_style_profile",
+        },
+    )
+    run = _api_post_json(
+        base_url,
+        f"/threads/{thread_id}/runs",
+        {
+            "assistant_id": assistant_id,
+            "input": {},
+            "multitask_strategy": "reject",
+            "metadata": {"retry_node": "compile_wearing_generation_prompt"},
+        },
+    )
+    return {
+        "mode": "retry_node",
+        "node": "compile_wearing_generation_prompt",
+        "api_url": base_url,
+        "assistant_id": assistant_id,
+        "thread_id": thread_id,
+        "run_id": run["run_id"],
+        "state_url": f"{base_url}/threads/{thread_id}/state",
+        "studio_url": _studio_url(base_url, thread_id),
+        "state_update": state_update,
+        "multitask_strategy": "reject",
+        "message": "已从编排生图提示词节点重新执行。",
+    }
+
+
 def _clear_workflow_flows(
     *,
     api_url: str,
@@ -553,63 +696,14 @@ def _clear_workflow_flows(
         thread_id = str(thread.get("thread_id") or "")
         if not thread_id:
             continue
-        item: dict[str, Any] = {"thread_id": thread_id}
-        state: Any = {}
-        try:
-            state = _api_get_json(base_url, f"/threads/{thread_id}/state")
-            item["state_loaded"] = True
-        except SystemExit as exc:
-            item["state_loaded"] = False
-            item["state_error"] = str(exc)
-
-        identity = _product_identity_from_thread_state_or_summary(state, thread)
-        if identity:
-            product_id, platform = identity
-            item["product_id"] = product_id
-            item["platform"] = platform
-
-        try:
-            _api_delete_json(base_url, f"/threads/{thread_id}")
-            item["deleted"] = True
-        except SystemExit as exc:
-            item["deleted"] = False
-            item["delete_error"] = str(exc)
-            items.append(item)
-            continue
-
-        if not identity:
-            item["database_reset"] = False
-            item["database_skip_reason"] = "missing_product_identity"
-            items.append(item)
-            continue
-
-        if identity in seen_products:
-            item["database_reset"] = False
-            item["database_skip_reason"] = "duplicate_product_identity"
-            items.append(item)
-            continue
-
-        seen_products.add(identity)
-        try:
-            product = update_product_fields(
-                settings.productv2_database_path,
-                identity[0],
-                identity[1],
-                status=reset_status,
-                locked_at=None,
-                locked_by=None,
-            )
-            item["database_reset"] = True
-            item["database_product"] = {
-                "product_id": product.product_id,
-                "platform": product.platform,
-                "status": product.status,
-                "locked_at": product.locked_at,
-                "locked_by": product.locked_by,
-            }
-        except Exception as exc:
-            item["database_reset"] = False
-            item["database_error"] = f"{type(exc).__name__}: {exc}"
+        item = _delete_thread_and_reset_product(
+            base_url=base_url,
+            thread_id=thread_id,
+            thread_summary=thread.get("summary") if isinstance(thread, dict) else {},
+            settings=settings,
+            reset_status=reset_status,
+            seen_products=seen_products,
+        )
         items.append(item)
 
     deleted_count = sum(1 for item in items if item.get("deleted") is True)
@@ -636,10 +730,192 @@ def _clear_workflow_flows(
     }
 
 
+def _stop_workflow_flow(
+    *,
+    api_url: str,
+    thread_id: str,
+) -> dict[str, Any]:
+    base_url = api_url.rstrip("/")
+    runs = _list_thread_runs(base_url, thread_id)
+    active_statuses = {"pending", "running"}
+    items: list[dict[str, Any]] = []
+    for run in runs:
+        run_id = str(run.get("run_id") or "")
+        status = str(run.get("status") or "").lower()
+        item: dict[str, Any] = {
+            "run_id": run_id,
+            "status": status,
+        }
+        if not run_id:
+            item["cancelled"] = False
+            item["skip_reason"] = "missing_run_id"
+            items.append(item)
+            continue
+        if status not in active_statuses:
+            item["cancelled"] = False
+            item["skip_reason"] = "inactive_status"
+            items.append(item)
+            continue
+        try:
+            _api_cancel_run(base_url, thread_id, run_id)
+            item["cancelled"] = True
+        except SystemExit as exc:
+            item["cancelled"] = False
+            item["cancel_error"] = str(exc)
+        items.append(item)
+
+    cancelled_runs = sum(1 for item in items if item.get("cancelled") is True)
+    active_runs = sum(1 for item in items if item.get("status") in active_statuses)
+    return {
+        "mode": "stop_flow",
+        "api_url": base_url,
+        "thread_id": thread_id,
+        "run_count": len(runs),
+        "active_runs": active_runs,
+        "cancelled_runs": cancelled_runs,
+        "items": items,
+        "message": f"已停止 {cancelled_runs} 个活跃 run。",
+    }
+
+
+def _delete_workflow_flow(
+    *,
+    api_url: str,
+    assistant_id: str,
+    thread_id: str,
+    reset_status: str = RAW_IMPORT_STATUS,
+) -> dict[str, Any]:
+    base_url = api_url.rstrip("/")
+    item = _delete_thread_and_reset_product(
+        base_url=base_url,
+        thread_id=thread_id,
+        thread_summary={},
+        settings=Settings(),
+        reset_status=reset_status,
+        seen_products=set(),
+    )
+    deleted_threads = 1 if item.get("deleted") is True else 0
+    products_reset = 1 if item.get("database_reset") is True else 0
+    skipped_products = (
+        1
+        if item.get("deleted") is True and item.get("database_reset") is not True
+        else 0
+    )
+    return {
+        "mode": "delete_flow",
+        "api_url": base_url,
+        "assistant_id": assistant_id,
+        "online": True,
+        "thread_id": thread_id,
+        "deleted_threads": deleted_threads,
+        "products_reset": products_reset,
+        "skipped_products": skipped_products,
+        "item": item,
+        "items": [item],
+        "message": (
+            f"已删除 {deleted_threads} 个 flow，并恢复 {products_reset} 个商品为"
+            f" {reset_status}。"
+        ),
+    }
+
+
+def _delete_thread_and_reset_product(
+    *,
+    base_url: str,
+    thread_id: str,
+    thread_summary: Any,
+    settings: Settings,
+    reset_status: str,
+    seen_products: set[tuple[str, str]] | None,
+) -> dict[str, Any]:
+    item: dict[str, Any] = {"thread_id": thread_id}
+    state: Any = {}
+    try:
+        state = _api_get_json(base_url, f"/threads/{thread_id}/state")
+        item["state_loaded"] = True
+    except SystemExit as exc:
+        item["state_loaded"] = False
+        item["state_error"] = str(exc)
+
+    thread = {
+        "summary": thread_summary if isinstance(thread_summary, dict) else {},
+    }
+    identity = _product_identity_from_thread_state_or_summary(state, thread)
+    if identity:
+        product_id, platform = identity
+        item["product_id"] = product_id
+        item["platform"] = platform
+
+    try:
+        _api_delete_json(base_url, f"/threads/{thread_id}")
+        item["deleted"] = True
+    except SystemExit as exc:
+        item["deleted"] = False
+        item["delete_error"] = str(exc)
+        return item
+
+    if not identity:
+        item["database_reset"] = False
+        item["database_skip_reason"] = "missing_product_identity"
+        return item
+
+    if seen_products is not None and identity in seen_products:
+        item["database_reset"] = False
+        item["database_skip_reason"] = "duplicate_product_identity"
+        return item
+
+    if seen_products is not None:
+        seen_products.add(identity)
+    try:
+        product = update_product_fields(
+            settings.productv2_database_path,
+            identity[0],
+            identity[1],
+            status=reset_status,
+            locked_at=None,
+            locked_by=None,
+        )
+        item["database_reset"] = True
+        item["database_product"] = {
+            "product_id": product.product_id,
+            "platform": product.platform,
+            "status": product.status,
+            "locked_at": product.locked_at,
+            "locked_by": product.locked_by,
+        }
+    except Exception as exc:
+        item["database_reset"] = False
+        item["database_error"] = f"{type(exc).__name__}: {exc}"
+    return item
+
+
 def _api_delete_json(base_url: str, path: str) -> Any:
     try:
         with httpx.Client(timeout=30.0) as client:
             response = client.delete(f"{base_url}{path}")
+            response.raise_for_status()
+            if response.content:
+                return response.json()
+            return {}
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text
+        raise SystemExit(
+            f"LangGraph API 请求失败：HTTP {exc.response.status_code} {detail}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise SystemExit(f"无法连接 LangGraph API：{base_url}，{exc}") from exc
+
+
+def _api_cancel_run(base_url: str, thread_id: str, run_id: str) -> Any:
+    thread_part = quote(thread_id, safe="")
+    run_part = quote(run_id, safe="")
+    path = f"/threads/{thread_part}/runs/{run_part}/cancel"
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(
+                f"{base_url}{path}",
+                params={"wait": "0", "action": "interrupt"},
+            )
             response.raise_for_status()
             if response.content:
                 return response.json()
@@ -929,6 +1205,289 @@ def _database_product_by_identity(product_id: str, platform: str) -> dict[str, A
     return product.model_dump()
 
 
+def _summarize_ai_calls_from_state(state: Any) -> list[dict[str, Any]]:
+    if not isinstance(state, dict):
+        return []
+    values = state.get("values")
+    if not isinstance(values, dict):
+        return []
+    checkpoints = values.get("ai_checkpoints")
+    if not isinstance(checkpoints, dict):
+        return []
+
+    calls: list[dict[str, Any]] = []
+    for key, raw_checkpoint in checkpoints.items():
+        if not isinstance(raw_checkpoint, dict):
+            continue
+        checkpoint = raw_checkpoint
+        checkpoint_input = _as_dict(checkpoint.get("input"))
+        checkpoint_result = _as_dict(checkpoint.get("result"))
+        runtime = _as_dict(checkpoint_input.get("_runtime"))
+        call = {
+            "key": str(key),
+            "label": _ai_call_label(str(key)),
+            "kind": _ai_call_kind(str(checkpoint.get("type") or ""), str(key)),
+            "status": str(checkpoint.get("status") or checkpoint_result.get("status") or ""),
+            "source": str(checkpoint.get("source") or ""),
+            "attempt_count": checkpoint.get("attempt_count"),
+            "input_hash": checkpoint.get("input_hash"),
+            "model": runtime.get("model"),
+            "providers": runtime.get("providers") or [],
+            "prompts": runtime.get("prompts") or {},
+            "input": _summarize_ai_call_input(str(key), checkpoint_input),
+            "output": _summarize_ai_call_output(str(key), checkpoint_result),
+            "images": _summarize_ai_call_images(str(key), checkpoint_input, checkpoint_result),
+            "raw_checkpoint": _redact_large_image_payloads(checkpoint),
+        }
+        calls.append(call)
+    return calls
+
+
+def _ai_call_label(key: str) -> str:
+    if key == "detect_size_reference":
+        return "LLM 产品合格性检测"
+    if key.startswith("learn_enroute_reference"):
+        return "LLM 学习 Enroute profile"
+    if key == "select_wearing_style_profile":
+        return "LLM 选择风格与模特"
+    if key == "compile_wearing_generation_prompt":
+        return "LLM 编排生图提示词"
+    if key.startswith("generate_wearing_image"):
+        return "图片 AI 生成穿戴图"
+    return key
+
+
+def _ai_call_kind(checkpoint_type: str, key: str) -> str:
+    if checkpoint_type:
+        return checkpoint_type
+    if key.startswith("generate_wearing_image"):
+        return "image_ai"
+    return "llm"
+
+
+def _summarize_ai_call_input(
+    key: str,
+    checkpoint_input: dict[str, Any],
+) -> dict[str, Any]:
+    if key == "detect_size_reference":
+        return {
+            "product": checkpoint_input.get("product"),
+            "collage_path": checkpoint_input.get("collage_path"),
+            "source_image_count": checkpoint_input.get("source_image_count"),
+            "numbered_sources": checkpoint_input.get("numbered_sources") or [],
+        }
+    if key.startswith("learn_enroute_reference"):
+        return {
+            "reference_image_path": checkpoint_input.get("reference_image_path"),
+            "enroute_product_id": checkpoint_input.get("enroute_product_id"),
+            "category": checkpoint_input.get("category"),
+        }
+    if key == "select_wearing_style_profile":
+        return {
+            "main_image_path": checkpoint_input.get("main_image_path"),
+            "size_reference_image_path": checkpoint_input.get("size_reference_image_path"),
+            "enroute_profile_count": len(
+                checkpoint_input.get("enroute_profile_summaries") or []
+            ),
+            "model_profile_count": len(
+                checkpoint_input.get("model_profile_summaries") or []
+            ),
+            "enroute_profile_summaries": checkpoint_input.get(
+                "enroute_profile_summaries"
+            )
+            or [],
+            "model_profile_summaries": checkpoint_input.get("model_profile_summaries")
+            or [],
+        }
+    if key == "compile_wearing_generation_prompt":
+        style_selection = _as_dict(
+            checkpoint_input.get("wearing_style_selection_result")
+        )
+        size_reference = _as_dict(checkpoint_input.get("size_reference_result"))
+        return {
+            "product": checkpoint_input.get("product"),
+            "main_image_path": _nested_value(
+                size_reference,
+                "selected_images",
+                "main_image",
+                "path",
+            ),
+            "size_reference_image_path": _nested_value(
+                size_reference,
+                "selected_images",
+                "size_reference_image",
+                "path",
+            ),
+            "enroute_reference_image_path": style_selection.get(
+                "enroute_reference_image_path"
+            )
+            or style_selection.get("reference_image_path"),
+            "selected_model_profile": style_selection.get("selected_model_profile"),
+            "selection": style_selection.get("selection"),
+            "product_assets_dir": checkpoint_input.get("product_assets_dir"),
+        }
+    if key.startswith("generate_wearing_image"):
+        prompt_result = _as_dict(
+            checkpoint_input.get("wearing_generation_prompt_result")
+        )
+        return {
+            "product": checkpoint_input.get("product"),
+            "attempt": checkpoint_input.get("attempt"),
+            "prompt": prompt_result.get("prompt"),
+            "prompt_length": len(str(prompt_result.get("prompt") or "")),
+            "grsai_input_images": prompt_result.get("input_images") or [],
+            "product_assets_dir": checkpoint_input.get("product_assets_dir"),
+        }
+    return _without_runtime(checkpoint_input)
+
+
+def _summarize_ai_call_output(
+    key: str,
+    checkpoint_result: dict[str, Any],
+) -> dict[str, Any]:
+    if key == "detect_size_reference":
+        return {
+            "status": checkpoint_result.get("status"),
+            "is_product_qualified": checkpoint_result.get("is_product_qualified"),
+            "failed_checks": checkpoint_result.get("failed_checks") or [],
+            "can_judge_size": checkpoint_result.get("can_judge_size"),
+            "size_reference_image_number": checkpoint_result.get(
+                "size_reference_image_number"
+            ),
+            "main_image_number": checkpoint_result.get("main_image_number"),
+            "reason": checkpoint_result.get("reason"),
+            "qualification_checks": checkpoint_result.get("qualification_checks") or {},
+        }
+    if key.startswith("learn_enroute_reference"):
+        analysis = _as_dict(checkpoint_result.get("analysis"))
+        return {
+            "status": checkpoint_result.get("status"),
+            "cache": checkpoint_result.get("cache"),
+            "enroute_product_id": checkpoint_result.get("enroute_product_id"),
+            "category": checkpoint_result.get("category"),
+            "summary": checkpoint_result.get("summary") or analysis.get("summary"),
+            "selected_model_profile": analysis.get("selected_model_profile"),
+        }
+    if key == "select_wearing_style_profile":
+        return {
+            "status": checkpoint_result.get("status"),
+            "cache": checkpoint_result.get("cache"),
+            "enroute_product_id": checkpoint_result.get("enroute_product_id"),
+            "category": checkpoint_result.get("category"),
+            "summary": checkpoint_result.get("summary"),
+            "selected_model_profile": checkpoint_result.get("selected_model_profile"),
+            "selection": checkpoint_result.get("selection"),
+        }
+    if key == "compile_wearing_generation_prompt":
+        return {
+            "status": checkpoint_result.get("status"),
+            "reason": checkpoint_result.get("reason"),
+            "prompt": checkpoint_result.get("prompt"),
+            "prompt_length": len(str(checkpoint_result.get("prompt") or "")),
+            "input_images": checkpoint_result.get("input_images") or [],
+            "selected_model_profile": checkpoint_result.get("selected_model_profile"),
+            "enroute_reference_image_path": checkpoint_result.get(
+                "enroute_reference_image_path"
+            ),
+        }
+    if key.startswith("generate_wearing_image"):
+        return {
+            "status": checkpoint_result.get("status"),
+            "reason": checkpoint_result.get("reason"),
+            "attempt": checkpoint_result.get("attempt"),
+            "generated_image_path": checkpoint_result.get("generated_image_path"),
+            "generated_image_url": checkpoint_result.get("generated_image_url"),
+            "image_generation": checkpoint_result.get("image_generation") or {},
+        }
+    return checkpoint_result
+
+
+def _summarize_ai_call_images(
+    key: str,
+    checkpoint_input: dict[str, Any],
+    checkpoint_result: dict[str, Any],
+) -> list[dict[str, str]]:
+    images: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(label: str, path: Any, role: str = "input") -> None:
+        text = str(path or "").strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        images.append({"label": label, "path": text, "role": role})
+
+    if key == "detect_size_reference":
+        add("检测拼图", checkpoint_input.get("collage_path"))
+        for source in checkpoint_input.get("numbered_sources") or []:
+            source_record = _as_dict(source)
+            add(f"子图 {source_record.get('index') or ''}".strip(), source_record.get("path"))
+    elif key.startswith("learn_enroute_reference"):
+        add("Enroute 学习图", checkpoint_input.get("reference_image_path"))
+        add("Enroute 学习结果图", checkpoint_result.get("reference_image_path"), "output")
+    elif key == "select_wearing_style_profile":
+        add("产品主图", checkpoint_input.get("main_image_path"))
+        add("尺寸参考图", checkpoint_input.get("size_reference_image_path"))
+        add(
+            "选中 Enroute",
+            checkpoint_result.get("enroute_reference_image_path")
+            or checkpoint_result.get("reference_image_path"),
+            "output",
+        )
+        selected_model = _as_dict(checkpoint_result.get("selected_model_profile"))
+        add("选中模特", selected_model.get("image_path"), "output")
+    elif key == "compile_wearing_generation_prompt":
+        output = _summarize_ai_call_output(key, checkpoint_result)
+        for index, path in enumerate(output.get("input_images") or [], start=1):
+            add(f"Prompt 编排输入图 {index}", path)
+        add("Enroute profile 图", output.get("enroute_reference_image_path"), "context")
+        selected_model = _as_dict(output.get("selected_model_profile"))
+        add("模特图", selected_model.get("image_path"), "context")
+    elif key.startswith("generate_wearing_image"):
+        input_summary = _summarize_ai_call_input(key, checkpoint_input)
+        for index, path in enumerate(input_summary.get("grsai_input_images") or [], start=1):
+            add(f"Grsai 输入图 {index}", path)
+        add("生成结果", checkpoint_result.get("generated_image_path"), "output")
+        add("生成结果 URL", checkpoint_result.get("generated_image_url"), "output")
+    return images
+
+
+def _without_runtime(value: dict[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if key != "_runtime"}
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _nested_value(value: dict[str, Any], *keys: str) -> Any:
+    current: Any = value
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _redact_large_image_payloads(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _redact_large_image_payloads(item)
+            for key, item in value.items()
+            if key != "_runtime"
+        }
+    if isinstance(value, list):
+        return [_redact_large_image_payloads(item) for item in value]
+    if isinstance(value, str) and value.startswith("data:image/"):
+        head, _, encoded = value.partition(",")
+        return {
+            "redacted": "data_url_image",
+            "header": head,
+            "base64_length": len(encoded),
+        }
+    return value
+
+
 def _extract_feishu_review_action(payload: dict[str, Any]) -> dict[str, str] | None:
     value: Any = None
     for source in (payload, payload.get("event")):
@@ -946,7 +1505,7 @@ def _extract_feishu_review_action(payload: dict[str, Any]) -> dict[str, str] | N
     if not isinstance(value, dict):
         return None
     action = str(value.get("action") or "").lower()
-    if action not in {"approve", "regenerate", "reject"}:
+    if action not in MANUAL_REVIEW_ACTIONS:
         return None
     thread_id = str(value.get("thread_id") or "")
     api_url = str(value.get("api_url") or DEFAULT_LANGGRAPH_API_URL)

@@ -35,6 +35,30 @@ def test_extract_card_review_action_from_card_event_dict() -> None:
     }
 
 
+def test_extract_card_review_action_accepts_recompile_prompt() -> None:
+    action = extract_card_review_action(
+        {
+            "event": {
+                "action": {
+                    "value": {
+                        "action": "recompile_prompt",
+                        "thread_id": "thread-1",
+                        "api_url": "http://testserver",
+                        "assistant_id": "graph",
+                    }
+                }
+            }
+        }
+    )
+
+    assert action == {
+        "action": "recompile_prompt",
+        "thread_id": "thread-1",
+        "api_url": "http://testserver",
+        "assistant_id": "graph",
+    }
+
+
 def test_extract_card_review_action_rejects_unknown_action() -> None:
     action = extract_card_review_action(
         {

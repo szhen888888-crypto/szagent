@@ -31,6 +31,9 @@ def test_parse_size_reference_detection_normalizes_numbers() -> None:
     assert detection.size_reference_image_number == 3
     assert detection.main_image_number == 2
     assert detection.reason == "有佩戴图"
+    assert detection.is_product_qualified is True
+    assert detection.failed_checks == []
+    assert detection.qualification_checks["size_reference"]["passed"] is True
 
 
 def test_parse_size_reference_detection_requires_numbers() -> None:
@@ -41,6 +44,8 @@ def test_parse_size_reference_detection_requires_numbers() -> None:
     assert detection.can_judge_size is False
     assert detection.image_numbers == []
     assert detection.size_reference_image_number is None
+    assert detection.is_product_qualified is False
+    assert detection.failed_checks == ["size_reference"]
 
 
 def test_parse_size_reference_detection_falls_back_to_first_reference_number() -> None:
@@ -52,6 +57,33 @@ def test_parse_size_reference_detection_falls_back_to_first_reference_number() -
     assert detection.image_numbers == [1, 2]
     assert detection.size_reference_image_number == 1
     assert detection.main_image_number is None
+
+
+def test_parse_size_reference_detection_accepts_product_qualification_fields() -> None:
+    detection = parse_size_reference_detection(
+        """
+        {
+          "is_product_qualified": false,
+          "qualification_checks": {
+            "size_reference": {
+              "passed": false,
+              "reason": "只有文字宣传图"
+            }
+          },
+          "failed_checks": ["size_reference"],
+          "can_judge_size": false,
+          "image_numbers": [],
+          "size_reference_image_number": null,
+          "main_image_number": 1,
+          "reason": "仅看到文字宣传图，无人体、手部或佩戴参照"
+        }
+        """
+    )
+
+    assert detection.is_product_qualified is False
+    assert detection.failed_checks == ["size_reference"]
+    assert detection.qualification_checks["size_reference"]["passed"] is False
+    assert detection.main_image_number == 1
 
 
 def test_collect_responses_stream_text_reads_sse_delta_events() -> None:

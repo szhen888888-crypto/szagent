@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from productv2.config import Settings
+from productv2.manual_review import MANUAL_REVIEW_ACTIONS
 
 
 class FeishuAPIError(RuntimeError):
@@ -93,10 +94,7 @@ def review_action_values(review_context: dict[str, Any]) -> list[dict[str, str]]
     context = normalize_review_context(review_context)
     if not context["thread_id"] or not context["api_url"] or not context["assistant_id"]:
         return []
-    return [
-        {**context, "action": action}
-        for action in ("approve", "regenerate", "reject")
-    ]
+    return [{**context, "action": action} for action in MANUAL_REVIEW_ACTIONS]
 
 
 class FeishuReviewClient:
@@ -317,6 +315,11 @@ def _review_card_actions(
                     "重生成",
                     "default",
                     {**context, "action": "regenerate"},
+                ),
+                _review_action_button(
+                    "重编排提示词",
+                    "default",
+                    {**context, "action": "recompile_prompt"},
                 ),
                 _review_action_button("拒绝", "danger", {**context, "action": "reject"}),
             ]

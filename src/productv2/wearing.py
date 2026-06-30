@@ -5,91 +5,60 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+import shutil
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from PIL import Image, ImageDraw, ImageFont
 
+from productv2.config import Settings
 from productv2.image_generation import get_image_generator, image_file_to_data_url
 from productv2.models import CandidateProduct
-from productv2.prompt_loader import load_latest_prompt_text, render_prompt_template
+from productv2.prompt_loader import load_latest_prompt_sections, render_prompt_template
+from productv2.vision import (
+    _image_file_to_data_url,
+    _log_llm_request,
+    _log_llm_response,
+    request_responses_stream_text,
+)
 from productv2.workflow_logging import WorkflowRunLogger
 
 
-WEARING_IMAGE_PROMPT_DIR = "wearing/generate_wearing_image"
+WEARING_PROMPT_COMPILER_DIR = "wearing/compile_generation_prompt"
+WEARING_PROMPT_COMPILER_MAX_OUTPUT_CHARS = 5000
+WEARING_PROMPT_COMPILER_MAX_OUTPUT_TOKENS = 1600
 
 
 def generate_wearing_image(
     candidate: CandidateProduct,
-    size_reference_result: dict[str, Any],
-    enroute_analysis_result: dict[str, Any] | None = None,
+    wearing_generation_prompt_result: dict[str, Any],
     output_dir: str | Path | None = None,
     logger: WorkflowRunLogger | None = None,
     attempt: int = 1,
     database_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Generate a wearing image from marked product references and style analysis."""
+    """Generate a wearing image from a compiled prompt and prepared inputs."""
 
-    selected_images = size_reference_result.get("selected_images", {})
-    if not isinstance(selected_images, dict):
-        selected_images = {}
-
-    main_image = selected_images.get("main_image", {})
-    size_reference_image = selected_images.get("size_reference_image", {})
-    main_image_path = str(main_image.get("path") or "")
-    size_reference_image_path = str(size_reference_image.get("path") or "")
-
-    if not main_image_path or not size_reference_image_path:
+    prompt = str(wearing_generation_prompt_result.get("prompt") or "").strip()
+    input_images = [
+        str(image_path)
+        for image_path in wearing_generation_prompt_result.get("input_images", [])
+        if str(image_path).strip()
+    ]
+    if not prompt or not input_images:
         return {
             "status": "skipped",
-            "reason": "selected_main_or_size_reference_missing",
+            "reason": "compiled_prompt_or_input_images_missing",
             "product_id": candidate.product_id,
             "platform": candidate.platform,
-            "size_reference_image_numbers": size_reference_result.get(
-                "image_numbers",
-                [],
-            ),
         }
 
-    active_output_dir = Path(output_dir) if output_dir is not None else Path(main_image_path).parent
-    marked_dir = active_output_dir / "wearing_generation_inputs"
-    marked_main_image_path = create_labeled_reference_image(
-        main_image_path,
-        marked_dir / "01_main_image.jpg",
-        "01 主图",
+    active_output_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else Path(input_images[0]).parent.parent
     )
-    marked_size_reference_image_path = create_labeled_reference_image(
-        size_reference_image_path,
-        marked_dir / "02_size_reference.jpg",
-        "02 尺寸参考图",
-    )
-    prompt = build_wearing_image_prompt(
-        candidate,
-        enroute_analysis_result or {},
-    )
-    selected_model_profile = _selected_model_profile(enroute_analysis_result or {})
-    enroute_reference_image_path = str(
-        (enroute_analysis_result or {}).get("reference_image_path") or ""
-    )
-    input_images = [
-        str(marked_main_image_path),
-        str(marked_size_reference_image_path),
-    ]
-    if selected_model_profile.get("image_path"):
-        input_images.append(str(selected_model_profile["image_path"]))
-
-    prepared_result = {
-        "product_id": candidate.product_id,
-        "platform": candidate.platform,
-        "size_reference_image_numbers": size_reference_result.get("image_numbers", []),
-        "marked_main_image_path": str(marked_main_image_path),
-        "marked_size_reference_image_path": str(marked_size_reference_image_path),
-        "enroute_reference_image_path": enroute_reference_image_path,
-        "selected_model_profile": selected_model_profile,
-        "input_images": input_images,
-        "prompt": prompt,
-    }
 
     missing_input_images = [
         image_path for image_path in input_images if not Path(image_path).is_file()
@@ -141,13 +110,106 @@ def generate_wearing_image(
     )
 
     return {
-        **prepared_result,
+        **wearing_generation_prompt_result,
         "status": "ok",
         "reason": "wearing_image_generated",
+        "product_id": candidate.product_id,
+        "platform": candidate.platform,
         "generated_image_path": str(generated_image_path),
         "generated_image_url": generation_result.urls[0],
         "image_generation": generation_summary,
         "attempt": attempt,
+    }
+
+
+def compile_wearing_generation_prompt(
+    candidate: CandidateProduct,
+    size_reference_result: dict[str, Any],
+    enroute_profile: dict[str, Any],
+    model_profile: dict[str, Any],
+    *,
+    selection_reason: str = "",
+    output_dir: str | Path | None = None,
+    logger: WorkflowRunLogger | None = None,
+    database_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Prepare inputs and compile the final image-generation prompt."""
+
+    selected_images = size_reference_result.get("selected_images", {})
+    if not isinstance(selected_images, dict):
+        selected_images = {}
+
+    main_image = selected_images.get("main_image", {})
+    size_reference_image = selected_images.get("size_reference_image", {})
+    main_image_path = str(main_image.get("path") or "")
+    size_reference_image_path = str(size_reference_image.get("path") or "")
+
+    if not main_image_path or not size_reference_image_path:
+        return {
+            "status": "skipped",
+            "reason": "selected_main_or_size_reference_missing",
+            "product_id": candidate.product_id,
+            "platform": candidate.platform,
+            "size_reference_image_numbers": size_reference_result.get(
+                "image_numbers",
+                [],
+            ),
+        }
+
+    active_output_dir = Path(output_dir) if output_dir is not None else Path(main_image_path).parent
+    marked_dir = active_output_dir / "wearing_generation_inputs"
+    reset_directory(marked_dir)
+    marked_main_image_path = create_labeled_reference_image(
+        main_image_path,
+        marked_dir / "01_main_image.jpg",
+        "01 主图",
+    )
+    marked_size_reference_image_path = create_labeled_reference_image(
+        size_reference_image_path,
+        marked_dir / "02_size_reference.jpg",
+        "02 尺寸参考图",
+    )
+    selected_model_profile = _model_profile_payload(model_profile)
+    enroute_reference_image_path = str(enroute_profile.get("image_path") or "")
+    input_images = [
+        str(marked_main_image_path),
+        str(marked_size_reference_image_path),
+    ]
+    if selected_model_profile.get("image_path"):
+        input_images.append(str(selected_model_profile["image_path"]))
+
+    missing_input_images = [
+        image_path for image_path in input_images if not Path(image_path).is_file()
+    ]
+    if missing_input_images:
+        raise FileNotFoundError(
+            "Wearing prompt input images are missing: "
+            + ", ".join(missing_input_images)
+        )
+
+    prompt = request_compiled_wearing_prompt(
+        candidate=candidate,
+        enroute_profile=enroute_profile,
+        model_profile=selected_model_profile,
+        input_images=input_images,
+        selection_reason=selection_reason,
+        logger=logger,
+        database_path=database_path,
+    )
+
+    return {
+        "status": "ok",
+        "reason": "wearing_generation_prompt_compiled",
+        "product_id": candidate.product_id,
+        "platform": candidate.platform,
+        "size_reference_image_numbers": size_reference_result.get("image_numbers", []),
+        "marked_main_image_path": str(marked_main_image_path),
+        "marked_size_reference_image_path": str(marked_size_reference_image_path),
+        "enroute_reference_image_path": enroute_reference_image_path,
+        "selected_model_profile": selected_model_profile,
+        "input_images": input_images,
+        "prompt": prompt,
+        "selection_reason": selection_reason,
     }
 
 
@@ -170,6 +232,17 @@ def save_generated_wearing_image(
     output_path = active_output_dir / f"{output_stem}{suffix}"
     output_path.write_bytes(image_bytes)
     return output_path
+
+
+def reset_directory(path: str | Path) -> Path:
+    directory = Path(path)
+    if directory.exists():
+        if directory.is_dir():
+            shutil.rmtree(directory)
+        else:
+            directory.unlink()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
 def _read_generated_image(
@@ -246,50 +319,116 @@ def create_labeled_reference_image(
     return output
 
 
-def build_wearing_image_prompt(
+def request_compiled_wearing_prompt(
+    *,
     candidate: CandidateProduct,
-    enroute_analysis_result: dict[str, Any],
+    enroute_profile: dict[str, Any],
+    model_profile: dict[str, Any],
+    input_images: list[str],
+    selection_reason: str = "",
+    logger: WorkflowRunLogger | None = None,
+    database_path: str | Path | None = None,
 ) -> str:
-    """Build a prompt from reverse analysis and marked product references."""
+    """Use the configured LLM to compile the final image-generation prompt."""
 
-    analysis = enroute_analysis_result.get("analysis")
-    if not isinstance(analysis, dict):
-        analysis = {}
-    summary = str(enroute_analysis_result.get("summary") or analysis.get("summary") or "")
-    selected_model_profile = _selected_model_profile(enroute_analysis_result)
+    active_settings = Settings()
+    payload = build_wearing_prompt_compiler_payload(
+        candidate,
+        enroute_profile,
+        model_profile,
+        input_images=input_images,
+        selection_reason=selection_reason,
+        settings=active_settings,
+    )
+    _log_llm_request(
+        logger,
+        context="wearing_generation_prompt_compiler",
+        payload={"raw_payload": payload},
+    )
+    text = request_responses_stream_text(
+        active_settings,
+        payload,
+        logger=logger,
+        request_context="wearing_generation_prompt_compiler",
+    )
+    _log_llm_response(
+        logger,
+        context="wearing_generation_prompt_compiler",
+        text=text,
+    )
+    return trim_compiled_wearing_prompt(text)
 
-    selected_model_profile_block = ""
-    if selected_model_profile:
-        selected_model_profile_block = "\n".join(
-            [
-                "选定固定模特：",
-                json.dumps(selected_model_profile, ensure_ascii=False, indent=2),
-            ],
-        )
-    return render_prompt_template(
-        load_latest_prompt_text(WEARING_IMAGE_PROMPT_DIR),
+
+def build_wearing_prompt_compiler_payload(
+    candidate: CandidateProduct,
+    enroute_profile: dict[str, Any],
+    model_profile: dict[str, Any],
+    *,
+    input_images: list[str] | None = None,
+    selection_reason: str = "",
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    active_settings = settings or Settings()
+    sections = load_latest_prompt_sections(WEARING_PROMPT_COMPILER_DIR)
+    system_prompt = render_prompt_template(
+        sections.system,
         {
             "product_id": candidate.product_id,
             "platform": candidate.platform,
-            "summary": summary,
-            "selected_model_profile_block": selected_model_profile_block,
-            "analysis_json": json.dumps(analysis, ensure_ascii=False, indent=2),
+            "model_profile_json": json.dumps(
+                model_profile,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "enroute_profile_json": json.dumps(
+                enroute_profile,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            "selection_reason": selection_reason,
         },
     )
+    return {
+        "model": active_settings.openai_model,
+        "max_output_tokens": WEARING_PROMPT_COMPILER_MAX_OUTPUT_TOKENS,
+        "input": [
+            {
+                "role": "system",
+                "content": [{"type": "input_text", "text": system_prompt}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": sections.user},
+                    *[
+                        {
+                            "type": "input_image",
+                            "image_url": _image_file_to_data_url(Path(image_path)),
+                            "detail": "high",
+                        }
+                        for image_path in (input_images or [])
+                    ],
+                ],
+            },
+        ],
+        "stream": True,
+    }
 
 
-def _selected_model_profile(enroute_analysis_result: dict[str, Any]) -> dict[str, Any]:
-    analysis = enroute_analysis_result.get("analysis")
-    if not isinstance(analysis, dict):
-        analysis = {}
-    selected = analysis.get("selected_model_profile")
-    if not isinstance(selected, dict):
-        return {}
+def trim_compiled_wearing_prompt(text: str) -> str:
+    prompt = text.strip()
+    if len(prompt) <= WEARING_PROMPT_COMPILER_MAX_OUTPUT_CHARS:
+        return prompt
+    return prompt[:WEARING_PROMPT_COMPILER_MAX_OUTPUT_CHARS].rstrip()
+
+
+def _model_profile_payload(selected: dict[str, Any]) -> dict[str, Any]:
     return {
         "profile_key": str(selected.get("profile_key") or ""),
         "name": str(selected.get("name") or ""),
+        "summary": str(selected.get("summary") or ""),
         "image_path": str(selected.get("image_path") or ""),
-        "reason": str(selected.get("reason") or ""),
+        "metadata_path": str(selected.get("metadata_path") or ""),
     }
 
 

@@ -78,10 +78,19 @@ def _flatten_urls(value: Any) -> list[str]:
 
 def _is_product_image_url(url: str) -> bool:
     lower_url = url.lower()
+    if not lower_url.startswith(("http://", "https://")):
+        return False
+    if "alicdn.com" not in lower_url:
+        return False
+    if lower_url.endswith(".svg"):
+        return False
+    if "_sum." in lower_url or lower_url.endswith("_sum.jpg"):
+        return False
+    if "-tps-" in lower_url:
+        return False
     return (
-        lower_url.startswith(("http://", "https://"))
-        and not lower_url.endswith(".svg")
-        and "alicdn.com" in lower_url
+        "/img/ibank/" in lower_url
+        or "/imgextra/" in lower_url
     )
 
 

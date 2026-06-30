@@ -12,7 +12,7 @@ uv sync
 ## 运行工作流
 
 ```bash
-uv run langgraph dev --allow-blocking
+uv run langgraph dev --allow-blocking --no-reload
 ```
 
 主流程已迁移到 `langgraph dev`。服务启动后，优先使用安全恢复命令启动 workflow：
@@ -39,7 +39,7 @@ uv run productv2 restart-workflow --resume-json '{"action":"approve"}'
 
 ## 控制台
 
-本地控制台用于操作 LangGraph dev 服务和 thread，不直接编辑商品数据：
+本地控制台用于操作 LangGraph dev 服务和 thread，不直接编辑商品内容；清理或删除 flow 时会恢复对应商品的处理状态和锁，避免商品卡在处理中：
 
 ```bash
 tools/control-console.sh start
@@ -66,12 +66,14 @@ tools/control-console.sh start --langgraph-port 2025
 也可以分别启动：
 
 ```bash
-uv run langgraph dev --allow-blocking
+uv run langgraph dev --allow-blocking --no-reload
 uv run productv2 control-api
 uv run productv2 control-ui
 ```
 
-控制台支持查看服务在线状态、由控制台启动/停止/重启本机 `langgraph dev`、查看 thread 列表与 state、启动 workflow、安全恢复 workflow，以及对 interrupted thread 发送 resume JSON。
+控制台支持查看服务在线状态、由控制台启动/停止/重启本机 `langgraph dev`、查看 thread 列表与 state、启动 workflow、安全恢复 workflow、停止单个 flow 的活跃 run、删除单个 flow、清理全部 flow，以及对 interrupted thread 发送 resume JSON。
+
+工作流运行时会持续写入 `workflow-logs/` 和 `data/products/` 产物。手动启动 `langgraph dev` 时应使用 `--no-reload`，避免日志或图片产物写入触发热重载，打断长时间 LLM / 图片 AI 节点。
 
 ## 初始化 SQLite 数据库
 
@@ -164,17 +166,18 @@ workflow-logs/<product_name>__<platform>__<product_id>.log
 
 在 `langgraph dev` 中，日志路径也会写入 workflow state 的 `workflow_log_path`。人工审核节点触发 `interrupt()` 时会记录 `node_interrupt`，这属于正常暂停，不是错误。
 
-节点日志以中文文本记录输入数据、输出数据、状态记忆摘要、状态写回逻辑，以及 `status`、`reason`、`cache`、`can_judge_size`、图片编号、选中模特、Enroute 参考图路径等关键判断字段。候选产品 `candidates` 只记录数量、产品 ID、平台、标题、状态、锁信息和 rawdata 字段名，不记录完整 rawdata。LLM 和图片 AI 调用会额外记录原始输入与原始输出，包括 prompt、请求参数、图片输入路径/URL、模型原始响应文本或接口原始响应 JSON。日志目录可通过 `PRODUCTV2_WORKFLOW_LOGS_DIR` 覆盖，默认不纳入 Git。
+节点日志以中文文本记录输入数据、输出数据、状态记忆摘要、状态写回逻辑，以及 `status`、`reason`、`cache`、`is_product_qualified`、`failed_checks`、`can_judge_size`、图片编号、选中模特、Enroute 参考图路径等关键判断字段。候选产品 `candidates` 只记录数量、产品 ID、平台、标题、状态、锁信息和 rawdata 字段名，不记录完整 rawdata。LLM 和图片 AI 调用会额外记录原始输入与原始输出，包括 prompt、请求参数、图片输入路径/URL、模型原始响应文本或接口原始响应 JSON。日志目录可通过 `PRODUCTV2_WORKFLOW_LOGS_DIR` 覆盖，默认不纳入 Git。
 
 ## AI Checkpoint
 
-所有 workflow 内的 LLM 和图片 AI 调用结果都会写入 LangGraph state 的 `ai_checkpoints`。当前保存范围：
+商品级 LLM 和图片 AI 调用结果会写入 LangGraph state 的 `ai_checkpoints`。当前保存范围：
 
-- `detect_size_reference`：主图拼图尺寸参照检测 LLM 结果。
-- `analyze_enroute_reference`：Enroute 佩戴参考图逆向分析 LLM 结果，包含数据库缓存命中结果。
+- `detect_size_reference`：主图拼图产品合格性检测 LLM 结果；当前首个硬规则是必须有可判断尺寸、比例或佩戴效果的真人/人体参照图。
+- `select_wearing_style_profile`：从已学习 Enroute profile 和固定模特摘要中选择风格与模特。
+- `compile_wearing_generation_prompt`：把产品素材、Enroute profile 和模特 profile 编排为最终生图提示词。
 - `generate_wearing_image_attempt_<n>`：第 `n` 次佩戴图生成图片 AI 结果。
 
-每个 checkpoint 包含 `type`、`source`、`input`、`input_hash`、`status`、`result` 和 `attempt_count`。节点重入时如果 `input_hash` 一致，会优先复用 state checkpoint，不重复调用外部 LLM 或图片生成接口；人工要求 `regenerate` 时会进入新的 attempt checkpoint。
+每个 checkpoint 包含 `type`、`source`、`input`、`input_hash`、`status`、`result` 和 `attempt_count`。节点重入时如果 `input_hash` 一致，会优先复用 state checkpoint，不重复调用外部 LLM 或图片生成接口；人工要求 `regenerate` 时会进入新的 attempt checkpoint。Enroute 单图学习是全局学习库行为，不写入单个 workflow state checkpoint，学习状态和复用分别以 `enroute_learning_references` / `enroute_image_analyses` 为准。
 
 ## LLM 配置
 
@@ -192,7 +195,7 @@ ENROUTE_ANALYSIS_TOP_P=0.9
 
 本地密钥放在 `.env`，模板见 `.env.example`。
 
-当前 OpenAI-compatible Responses 接口已探测支持 `temperature` 和 `top_p`；`top_k` 会触发网关失败或不稳定，因此 Enroute 逆向分析只使用 `temperature/top_p` 做创意采样，尺寸检测仍保持稳定默认参数。
+当前 OpenAI-compatible Responses 接口已探测支持 `temperature` 和 `top_p`；`top_k` 会触发网关失败或不稳定，因此 Enroute 逆向分析只使用 `temperature/top_p` 做创意采样，产品合格性检测仍保持稳定默认参数。
 
 ## 图片生成配置
 
@@ -263,7 +266,9 @@ https://enroutejewelry.com/collections/<category>/products.json
 - `necklaces`
 - `rings`
 
-每个类目按 `sort_by=best-selling` 拉取产品，并下载产品图片。默认每个类目目标采集约 60 张图片，最低目标 50 张，最多 70 张。输出目录：
+每个类目按 `sort_by=best-selling` 拉取产品，并下载产品图片。普通 workflow 和控制台统计不扫描该目录；下载、删除或同步图片库这类明确图片管理动作结束后，会把可学习的 `02.jpg` 参考记录同步到 SQLite `enroute_learning_references` 表。之后所有学习数量、未学习数量和 UI 状态都只从数据库查询。
+
+默认下载完整产品图片；如果只需要学习参考图，使用 `--reference-only`，只抽取每个产品的第 2 张图并保存为 `02.jpg`。产品数模式默认目标约 80 个产品，范围约 70-100 个产品。输出目录：
 
 ```text
 enroute-bestsellers/
@@ -278,8 +283,9 @@ enroute-bestsellers/
 
 ```bash
 uv run python tools/enroute-bestsellers/download.py \
-  --target-images-per-category 60 \
-  --max-images-per-category 70
+  --reference-only \
+  --target-products-per-category 80 \
+  --max-products-per-category 100
 ```
 
 ## 测试

@@ -154,14 +154,16 @@ def render_prompt_template(
     template: str,
     values: dict[str, object],
     *,
-    strict: bool = True,
+    strict: bool = False,
 ) -> str:
     """Render `{name}` placeholders without treating other braces specially.
 
-    Literal JSON braces in the template are left untouched. When ``strict`` is
-    set, every provided value must have a matching ``{name}`` placeholder so a
-    renamed or mistyped variable surfaces immediately instead of silently
-    rendering nothing.
+    Literal JSON braces in the template are left untouched. Extra values are
+    ignored by default so prompt versions can remove placeholders without
+    breaking runtime rendering. When ``strict`` is explicitly set, every
+    provided value must have a matching ``{name}`` placeholder so a renamed or
+    mistyped variable surfaces immediately instead of silently rendering
+    nothing.
     """
 
     if strict:
@@ -225,4 +227,3 @@ def _versioned_prompt_file(path: Path) -> tuple[int, Path] | None:
     if not match:
         return None
     return int(match.group("version")), path
-

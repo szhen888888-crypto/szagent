@@ -53,9 +53,10 @@ def test_build_feishu_review_card_contains_images_and_actions(tmp_path) -> None:
     )
 
     assert image_keys == ["img-main", "img-size", "img-wearing"]
-    assert [button["value"]["action"] for button in action["actions"][:3]] == [
+    assert [button["value"]["action"] for button in action["actions"][:4]] == [
         "approve",
         "regenerate",
+        "recompile_prompt",
         "reject",
     ]
     assert action["actions"][0]["value"]["thread_id"] == "thread-1"
@@ -111,6 +112,7 @@ def test_notify_feishu_review_uploads_images_and_sends_message(tmp_path) -> None
     assert [item["action"] for item in result["action_values"]] == [
         "approve",
         "regenerate",
+        "recompile_prompt",
         "reject",
     ]
     assert result["message_id"] == "msg-1"

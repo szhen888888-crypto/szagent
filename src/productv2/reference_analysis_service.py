@@ -72,7 +72,14 @@ class SelectedModelProfile(BaseModel):
 class EnrouteReferenceAnalysis(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    is_valid_wearing_reference: bool = False
+    is_valid_wearing_reference: bool | None = None
+    is_valid_human_reference: bool | None = None
+    invalid_reason: str = ""
+    analysis_scope: dict[str, Any] = Field(default_factory=dict)
+    observed_facts: dict[str, Any] | None = None
+    estimated_shooting_profile: dict[str, Any] | None = None
+    confidence_and_limits: dict[str, Any] = Field(default_factory=dict)
+    transfer_notes: dict[str, Any] = Field(default_factory=dict)
     summary: str = ""
     selected_model_profile: SelectedModelProfile = Field(
         default_factory=SelectedModelProfile
@@ -89,8 +96,15 @@ class EnrouteAnalysisSelection(BaseModel):
     reason: str = ""
 
 
+class WearingStyleProfileSelection(BaseModel):
+    selected_enroute_product_id: str = ""
+    selected_model_profile_key: str = ""
+    reason: str = ""
+
+
 ENROUTE_REFERENCE_ANALYSIS_PROMPT_DIR = "reference_analysis/enroute_reference"
 ENROUTE_ANALYSIS_SELECTION_PROMPT_DIR = "reference_analysis/enroute_selection"
+WEARING_STYLE_SELECTION_PROMPT_DIR = "wearing/style_profile_selection"
 
 DEFAULT_MODEL_PROFILE_OPTIONS = "暂无可选固定模特 profile。"
 
@@ -152,6 +166,7 @@ def analyze_enroute_reference_image(
         logger=logger,
         request_context="enroute_reference_analysis",
         database_path=database_path,
+        use_ai_call_lock=False,
     )
 
 
@@ -269,6 +284,78 @@ def select_enroute_analysis_from_summaries(
     )
 
 
+def select_wearing_style_profile(
+    main_image_path: str | Path,
+    size_reference_image_path: str | Path,
+    enroute_profile_summaries: list[dict[str, Any]],
+    model_profile_summaries: list[dict[str, Any]],
+    settings: Settings | None = None,
+    model: Any | None = None,
+    logger: WorkflowRunLogger | None = None,
+    database_path: str | Path | None = None,
+) -> WearingStyleProfileSelection:
+    """Select one Enroute profile and one fixed model profile for generation."""
+
+    main_path = Path(main_image_path)
+    size_path = Path(size_reference_image_path)
+    if model is not None:
+        messages = _wearing_style_selection_messages(
+            main_path,
+            size_path,
+            enroute_profile_summaries,
+            model_profile_summaries,
+        )
+        _log_llm_request(
+            logger,
+            context="wearing_style_profile_selection_model",
+            payload={
+                "main_image_file": describe_file_for_log(main_path),
+                "size_reference_image_file": describe_file_for_log(size_path),
+                "raw_messages": messages,
+            },
+        )
+        response = model.invoke(messages)
+        text = _message_text(response)
+        _log_llm_response(
+            logger,
+            context="wearing_style_profile_selection_model",
+            text=text,
+        )
+        parsed = parse_wearing_style_profile_selection(text)
+        _log_llm_parsed_output(
+            logger,
+            context="wearing_style_profile_selection_model",
+            parsed=parsed.model_dump(),
+        )
+        return parsed
+
+    active_settings = settings or Settings()
+    payload = build_wearing_style_selection_payload(
+        active_settings,
+        _image_file_to_data_url(main_path),
+        _image_file_to_data_url(size_path),
+        enroute_profile_summaries,
+        model_profile_summaries,
+    )
+    _log_llm_request(
+        logger,
+        context="wearing_style_profile_selection",
+        payload={
+            "main_image_file": describe_file_for_log(main_path),
+            "size_reference_image_file": describe_file_for_log(size_path),
+            "raw_payload": payload,
+        },
+    )
+    return request_responses_stream_parsed(
+        active_settings,
+        payload,
+        parse_wearing_style_profile_selection,
+        logger=logger,
+        request_context="wearing_style_profile_selection",
+        database_path=database_path,
+    )
+
+
 def build_enroute_analysis_selection_payload(
     settings: Settings,
     main_image_url: str,
@@ -320,9 +407,67 @@ def build_enroute_analysis_selection_payload(
     return payload
 
 
+def build_wearing_style_selection_payload(
+    settings: Settings,
+    main_image_url: str,
+    size_reference_image_url: str,
+    enroute_profile_summaries: list[dict[str, Any]],
+    model_profile_summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a Responses vision request for style + model selection."""
+
+    payload: dict[str, Any] = {
+        "model": settings.openai_model,
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": build_wearing_style_selection_system_prompt(
+                            enroute_profile_summaries,
+                            model_profile_summaries,
+                        ),
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": wearing_style_selection_user_prompt(),
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": main_image_url,
+                        "detail": "high",
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": size_reference_image_url,
+                        "detail": "high",
+                    },
+                ],
+            },
+        ],
+        "stream": True,
+    }
+    if settings.enroute_analysis_temperature is not None:
+        payload["temperature"] = settings.enroute_analysis_temperature
+    if settings.enroute_analysis_top_p is not None:
+        payload["top_p"] = settings.enroute_analysis_top_p
+    return payload
+
+
 def parse_enroute_analysis_selection(text: str) -> EnrouteAnalysisSelection:
     payload = _extract_json_object(text)
     return EnrouteAnalysisSelection.model_validate(payload)
+
+
+def parse_wearing_style_profile_selection(text: str) -> WearingStyleProfileSelection:
+    payload = _extract_json_object(text)
+    return WearingStyleProfileSelection.model_validate(payload)
 
 
 def build_enroute_analysis_selection_system_prompt(
@@ -334,12 +479,29 @@ def build_enroute_analysis_selection_system_prompt(
     )
 
 
+def build_wearing_style_selection_system_prompt(
+    enroute_profile_summaries: list[dict[str, Any]],
+    model_profile_summaries: list[dict[str, Any]],
+) -> str:
+    return render_prompt_template(
+        load_latest_prompt_sections(WEARING_STYLE_SELECTION_PROMPT_DIR).system,
+        {
+            "enroute_profile_summaries": json_dumps_for_prompt(
+                enroute_profile_summaries
+            ),
+            "model_profile_summaries": json_dumps_for_prompt(model_profile_summaries),
+        },
+    )
+
+
 def parse_enroute_reference_analysis(text: str) -> EnrouteReferenceAnalysis:
     payload = _extract_json_object(text)
     analysis = EnrouteReferenceAnalysis.model_validate(payload)
     analysis.clothing_style.styling_keywords = _clean_instruction_list(
         analysis.clothing_style.styling_keywords
     )
+    if not analysis.summary:
+        analysis.summary = summarize_enroute_profile(analysis.model_dump())
     return analysis
 
 
@@ -358,6 +520,10 @@ def enroute_reference_analysis_user_prompt() -> str:
 
 def enroute_analysis_selection_user_prompt() -> str:
     return load_latest_prompt_sections(ENROUTE_ANALYSIS_SELECTION_PROMPT_DIR).user
+
+
+def wearing_style_selection_user_prompt() -> str:
+    return load_latest_prompt_sections(WEARING_STYLE_SELECTION_PROMPT_DIR).user
 
 
 def format_model_profile_options(
@@ -438,6 +604,124 @@ def _selection_vision_messages(
             ],
         },
     ]
+
+
+def _wearing_style_selection_messages(
+    main_path: Path,
+    size_path: Path,
+    enroute_profile_summaries: list[dict[str, Any]],
+    model_profile_summaries: list[dict[str, Any]],
+) -> list[Any]:
+    return [
+        {
+            "role": "system",
+            "content": build_wearing_style_selection_system_prompt(
+                enroute_profile_summaries,
+                model_profile_summaries,
+            ),
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": wearing_style_selection_user_prompt()},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": _image_file_to_data_url(main_path),
+                        "detail": "high",
+                    },
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": _image_file_to_data_url(size_path),
+                        "detail": "high",
+                    },
+                },
+            ],
+        },
+    ]
+
+
+def summarize_enroute_profile(profile: dict[str, Any]) -> str:
+    """Build a compact summary for profile-selection prompts and cache rows."""
+
+    explicit = str(profile.get("summary") or "").strip()
+    if explicit:
+        return explicit
+    if profile.get("is_valid_human_reference") is False:
+        return str(profile.get("invalid_reason") or "无效人物参考图").strip()
+
+    parts: list[str] = []
+    transfer_notes = profile.get("transfer_notes")
+    if isinstance(transfer_notes, dict):
+        stable = transfer_notes.get("stable_reference_features")
+        if isinstance(stable, list):
+            parts.extend(str(item).strip() for item in stable[:4] if str(item).strip())
+
+    observed = profile.get("observed_facts")
+    if isinstance(observed, dict):
+        clothing = observed.get("clothing_observation")
+        if isinstance(clothing, dict):
+            for key in ("garment_type", "neckline", "skin_exposure_effect"):
+                value = str(clothing.get(key) or "").strip()
+                if value:
+                    parts.append(value)
+        composition = observed.get("composition_observation")
+        if isinstance(composition, dict):
+            for key in ("shot_type", "crop_boundaries", "subject_scale"):
+                value = str(composition.get(key) or "").strip()
+                if value:
+                    parts.append(value)
+
+    shooting = profile.get("estimated_shooting_profile")
+    if isinstance(shooting, dict):
+        camera = shooting.get("camera_estimate")
+        if isinstance(camera, dict):
+            for key in ("shot_size_estimate", "focal_length_35mm_equivalent_estimate"):
+                value = _estimate_text(camera.get(key))
+                if value:
+                    parts.append(value)
+        lighting = shooting.get("lighting_estimate")
+        if isinstance(lighting, dict):
+            value = _estimate_text(lighting.get("key_light_position"))
+            if value:
+                parts.append(value)
+
+    legacy_sections = [
+        profile.get("model_style"),
+        profile.get("clothing_style"),
+        profile.get("scene_style"),
+        profile.get("shooting_style"),
+    ]
+    for section in legacy_sections:
+        if isinstance(section, dict):
+            for value in section.values():
+                if isinstance(value, list):
+                    parts.extend(str(item).strip() for item in value if str(item).strip())
+                else:
+                    text = str(value or "").strip()
+                    if text:
+                        parts.append(text)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        if part in seen:
+            continue
+        seen.add(part)
+        deduped.append(part)
+        if len(deduped) >= 8:
+            break
+    return "；".join(deduped) or "人物摄影参考 profile"
+
+
+def _estimate_text(value: Any) -> str:
+    if isinstance(value, dict):
+        estimate = str(value.get("estimate") or "").strip()
+        evidence = str(value.get("evidence") or "").strip()
+        return "，".join(part for part in (estimate, evidence) if part)
+    return str(value or "").strip()
 
 
 def json_dumps_for_prompt(value: Any) -> str:

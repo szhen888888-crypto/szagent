@@ -79,6 +79,41 @@ CREATE INDEX IF NOT EXISTS idx_enroute_image_analyses_category
 ON enroute_image_analyses (enroute_category);
 """
 
+ENROUTE_LEARNING_REFERENCES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS enroute_learning_references (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    enroute_product_id TEXT NOT NULL,
+    enroute_category TEXT NOT NULL,
+    enroute_title TEXT NOT NULL DEFAULT '',
+    enroute_handle TEXT NOT NULL DEFAULT '',
+    product_dir TEXT NOT NULL DEFAULT '',
+    image_path TEXT NOT NULL,
+    image_position INTEGER NOT NULL DEFAULT 2,
+    source_url TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    learning_attempts INTEGER NOT NULL DEFAULT 0,
+    analysis_id INTEGER DEFAULT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_workflow_log_path TEXT NOT NULL DEFAULT '',
+    learned_at TEXT DEFAULT NULL,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (enroute_product_id)
+);
+"""
+
+ENROUTE_LEARNING_REFERENCES_CATEGORY_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_enroute_learning_references_category
+ON enroute_learning_references (enroute_category);
+"""
+
+ENROUTE_LEARNING_REFERENCES_STATUS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_enroute_learning_references_status
+ON enroute_learning_references (status);
+"""
+
 MODEL_PROFILES_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS model_profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,6 +169,7 @@ def init_database(database_path: str | Path = DEFAULT_DATABASE_PATH) -> Path:
     with connect_database(path) as connection:
         connection.execute(PRODUCTS_TABLE_SQL)
         connection.execute(ENROUTE_IMAGE_ANALYSES_TABLE_SQL)
+        connection.execute(ENROUTE_LEARNING_REFERENCES_TABLE_SQL)
         connection.execute(MODEL_PROFILES_TABLE_SQL)
         connection.execute(AI_CALL_LOCKS_TABLE_SQL)
         _ensure_products_column(connection, "locked_at", "TEXT DEFAULT NULL")
@@ -141,6 +177,8 @@ def init_database(database_path: str | Path = DEFAULT_DATABASE_PATH) -> Path:
         connection.execute(PRODUCTS_STATUS_INDEX_SQL)
         connection.execute(PRODUCTS_LOCK_INDEX_SQL)
         connection.execute(ENROUTE_IMAGE_ANALYSES_CATEGORY_INDEX_SQL)
+        connection.execute(ENROUTE_LEARNING_REFERENCES_CATEGORY_INDEX_SQL)
+        connection.execute(ENROUTE_LEARNING_REFERENCES_STATUS_INDEX_SQL)
         connection.execute(AI_CALL_LOCKS_STATUS_INDEX_SQL)
     return path
 
@@ -742,6 +780,222 @@ def clear_enroute_image_analyses(database_path: str | Path) -> dict[str, int]:
     }
 
 
+def upsert_enroute_learning_reference(
+    database_path: str | Path,
+    *,
+    enroute_product_id: str,
+    enroute_category: str,
+    enroute_title: str = "",
+    enroute_handle: str = "",
+    product_dir: str = "",
+    image_path: str,
+    image_position: int = 2,
+    source_url: str = "",
+    metadata: dict[str, Any] | None = None,
+    status: str = "pending",
+) -> dict[str, Any]:
+    """Insert or refresh one local Enroute learning reference."""
+
+    init_database(database_path)
+    metadata_text = json.dumps(metadata or {}, ensure_ascii=False, separators=(",", ":"))
+    with connect_database(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO enroute_learning_references (
+                enroute_product_id, enroute_category, enroute_title,
+                enroute_handle, product_dir, image_path, image_position,
+                source_url, status, metadata_json, last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(enroute_product_id) DO UPDATE SET
+                enroute_category = excluded.enroute_category,
+                enroute_title = excluded.enroute_title,
+                enroute_handle = excluded.enroute_handle,
+                product_dir = excluded.product_dir,
+                image_path = excluded.image_path,
+                image_position = excluded.image_position,
+                source_url = excluded.source_url,
+                metadata_json = excluded.metadata_json,
+                last_seen_at = CURRENT_TIMESTAMP,
+                status = CASE
+                    WHEN enroute_learning_references.status IN ('learned', 'learning')
+                    THEN enroute_learning_references.status
+                    ELSE excluded.status
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                enroute_product_id,
+                enroute_category,
+                enroute_title,
+                enroute_handle,
+                product_dir,
+                image_path,
+                image_position,
+                source_url,
+                status,
+                metadata_text,
+            ),
+        )
+
+    row = get_enroute_learning_reference(database_path, enroute_product_id)
+    if row is None:
+        raise ValueError(f"Enroute learning reference not found: {enroute_product_id}")
+    return row
+
+
+def get_enroute_learning_reference(
+    database_path: str | Path,
+    enroute_product_id: str,
+) -> dict[str, Any] | None:
+    """Load one Enroute learning reference row."""
+
+    init_database(database_path)
+    with connect_database(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT id, enroute_product_id, enroute_category, enroute_title,
+                   enroute_handle, product_dir, image_path, image_position,
+                   source_url, status, learning_attempts, analysis_id,
+                   metadata_json, last_error, last_workflow_log_path, learned_at,
+                   last_seen_at, created_at, updated_at
+            FROM enroute_learning_references
+            WHERE enroute_product_id = ?
+            """,
+            (enroute_product_id,),
+        ).fetchone()
+    return _row_to_enroute_learning_reference(row) if row else None
+
+
+def list_enroute_learning_references(
+    database_path: str | Path,
+    enroute_category: str | None = None,
+) -> list[dict[str, Any]]:
+    """Load Enroute learning references, optionally limited to one category."""
+
+    init_database(database_path)
+    with connect_database(database_path) as connection:
+        if enroute_category:
+            rows = connection.execute(
+                """
+                SELECT id, enroute_product_id, enroute_category, enroute_title,
+                       enroute_handle, product_dir, image_path, image_position,
+                       source_url, status, learning_attempts, analysis_id,
+                       metadata_json, last_error, last_workflow_log_path, learned_at,
+                       last_seen_at, created_at, updated_at
+                FROM enroute_learning_references
+                WHERE enroute_category = ?
+                ORDER BY enroute_category, id
+                """,
+                (enroute_category,),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """
+                SELECT id, enroute_product_id, enroute_category, enroute_title,
+                       enroute_handle, product_dir, image_path, image_position,
+                       source_url, status, learning_attempts, analysis_id,
+                       metadata_json, last_error, last_workflow_log_path, learned_at,
+                       last_seen_at, created_at, updated_at
+                FROM enroute_learning_references
+                ORDER BY enroute_category, id
+                """
+            ).fetchall()
+    return [_row_to_enroute_learning_reference(row) for row in rows]
+
+
+def update_enroute_learning_reference_status(
+    database_path: str | Path,
+    *,
+    enroute_product_id: str,
+    status: str,
+    analysis_id: int | None = None,
+    last_error: str = "",
+    last_workflow_log_path: str = "",
+    increment_attempts: bool = False,
+) -> dict[str, Any]:
+    """Update learning state for one Enroute reference."""
+
+    init_database(database_path)
+    learned_at_sql = ", learned_at = CASE WHEN ? = 'learned' THEN CURRENT_TIMESTAMP ELSE learned_at END"
+    with connect_database(database_path) as connection:
+        connection.execute(
+            f"""
+            UPDATE enroute_learning_references
+            SET status = ?,
+                analysis_id = COALESCE(?, analysis_id),
+                last_error = ?,
+                last_workflow_log_path = ?,
+                learning_attempts = learning_attempts + ?,
+                updated_at = CURRENT_TIMESTAMP
+                {learned_at_sql}
+            WHERE enroute_product_id = ?
+            """,
+            (
+                status,
+                analysis_id,
+                last_error,
+                last_workflow_log_path,
+                1 if increment_attempts else 0,
+                status,
+                enroute_product_id,
+            ),
+        )
+
+    row = get_enroute_learning_reference(database_path, enroute_product_id)
+    if row is None:
+        raise ValueError(f"Enroute learning reference not found: {enroute_product_id}")
+    return row
+
+
+def prune_enroute_learning_references(
+    database_path: str | Path,
+    *,
+    active_product_ids: set[str],
+    enroute_category: str | None = None,
+) -> int:
+    """Delete learning rows that are no longer in the managed reference library."""
+
+    init_database(database_path)
+    rows = list_enroute_learning_references(database_path, enroute_category)
+    deleted_ids = [
+        str(row.get("enroute_product_id") or "")
+        for row in rows
+        if str(row.get("enroute_product_id") or "") not in active_product_ids
+    ]
+    if not deleted_ids:
+        return 0
+
+    with connect_database(database_path) as connection:
+        connection.executemany(
+            """
+            DELETE FROM enroute_learning_references
+            WHERE enroute_product_id = ?
+            """,
+            [(product_id,) for product_id in deleted_ids],
+        )
+    return len(deleted_ids)
+
+
+def clear_enroute_learning_references(database_path: str | Path) -> dict[str, int]:
+    """Delete Enroute learning reference rows."""
+
+    init_database(database_path)
+    with connect_database(database_path) as connection:
+        total_before = connection.execute(
+            "SELECT COUNT(*) FROM enroute_learning_references"
+        ).fetchone()[0]
+        connection.execute("DELETE FROM enroute_learning_references")
+        total_after = connection.execute(
+            "SELECT COUNT(*) FROM enroute_learning_references"
+        ).fetchone()[0]
+    return {
+        "deleted_count": int(total_before - total_after),
+        "total_before": int(total_before),
+        "total_after": int(total_after),
+    }
+
+
 def upsert_enroute_image_analysis(
     database_path: str | Path,
     *,
@@ -758,6 +1012,10 @@ def upsert_enroute_image_analysis(
 
     init_database(database_path)
     analysis_text = json.dumps(analysis_json, ensure_ascii=False, separators=(",", ":"))
+    is_valid_learning_profile = not (
+        analysis_json.get("is_valid_human_reference") is False
+        or analysis_json.get("is_valid_wearing_reference") is False
+    )
     with connect_database(database_path) as connection:
         connection.execute(
             """
@@ -787,6 +1045,27 @@ def upsert_enroute_image_analysis(
                 summary,
             ),
         )
+        cached_row = connection.execute(
+            """
+            SELECT id
+            FROM enroute_image_analyses
+            WHERE enroute_product_id = ?
+            """,
+            (enroute_product_id,),
+        ).fetchone()
+        if cached_row is not None and is_valid_learning_profile:
+            connection.execute(
+                """
+                UPDATE enroute_learning_references
+                SET status = 'learned',
+                    analysis_id = ?,
+                    last_error = '',
+                    learned_at = COALESCE(learned_at, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE enroute_product_id = ?
+                """,
+                (int(cached_row["id"]), enroute_product_id),
+            )
 
     cached = get_enroute_image_analysis(database_path, enroute_product_id)
     if cached is None:
@@ -805,6 +1084,30 @@ def _row_to_enroute_image_analysis(row: sqlite3.Row) -> dict[str, Any]:
         "image_position": row["image_position"],
         "analysis_json": json.loads(row["analysis_json"]),
         "summary": row["summary"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _row_to_enroute_learning_reference(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "enroute_product_id": row["enroute_product_id"],
+        "enroute_category": row["enroute_category"],
+        "enroute_title": row["enroute_title"],
+        "enroute_handle": row["enroute_handle"],
+        "product_dir": row["product_dir"],
+        "image_path": row["image_path"],
+        "image_position": row["image_position"],
+        "source_url": row["source_url"],
+        "status": row["status"],
+        "learning_attempts": row["learning_attempts"],
+        "analysis_id": row["analysis_id"],
+        "metadata": _json_loads_dict(row["metadata_json"]),
+        "last_error": row["last_error"],
+        "last_workflow_log_path": row["last_workflow_log_path"],
+        "learned_at": row["learned_at"],
+        "last_seen_at": row["last_seen_at"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }

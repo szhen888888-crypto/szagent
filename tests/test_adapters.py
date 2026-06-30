@@ -95,8 +95,10 @@ def test_1688_adapter_extracts_main_and_specification_images() -> None:
             "detail": {
                 "image_urls": [
                     "https://img.alicdn.com/icon.svg",
+                    "https://img.alicdn.com/imgextra/i2/O1CN01pa-55-tps-24-24.svg",
                     "https://cbu01.alicdn.com/img/ibank/main.jpg_.webp",
                     "https://cbu01.alicdn.com/img/ibank/main.jpg_.webp",
+                    "https://cbu01.alicdn.com/img/ibank/main.jpg_sum.jpg",
                 ],
                 "sku_images": {
                     "red": "https://cbu01.alicdn.com/img/ibank/red.jpg_.webp"

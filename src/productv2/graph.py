@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -18,27 +16,40 @@ from productv2.db import (
     FAILED_STATUS,
     get_enroute_image_analysis,
     import_raw_data_directory,
-    list_enroute_image_analyses_by_category,
     load_model_profiles,
     sync_default_model_profiles,
     update_product_fields,
     upsert_enroute_image_analysis,
 )
-from productv2.enroute import EnrouteReference, list_enroute_wearing_references
+from productv2.enroute import EnrouteReference
+from productv2.enroute_learning import (
+    enroute_analysis_is_valid_profile,
+    mark_enroute_reference_failed,
+    mark_enroute_reference_learned,
+    mark_enroute_reference_learning,
+    plan_enroute_learning_for_candidate,
+    reference_from_learning_row,
+    valid_enroute_analysis_cache,
+)
 from productv2.images import merge_remote_images_to_numbered_collage, product_asset_dir
 from productv2.manual_review import (
+    REVIEW_ACTION_APPROVE,
+    REVIEW_ACTION_RECOMPILE_PROMPT,
+    REVIEW_ACTION_REGENERATE,
+    REVIEW_ACTION_REJECT,
     build_wearing_image_review_request,
     normalize_manual_review_decision,
 )
 from productv2.models import CandidateProduct, ListingDraft
 from productv2.reference_analysis_service import (
     analyze_enroute_reference_image,
-    select_enroute_analysis_from_summaries,
+    select_wearing_style_profile,
+    summarize_enroute_profile,
 )
 from productv2.selection import select_unfinished_product_with_adapter
 from productv2.state import initialize_product_state, set_extra
 from productv2.vision import detect_size_reference_images
-from productv2.wearing import generate_wearing_image
+from productv2.wearing import compile_wearing_generation_prompt, generate_wearing_image
 from productv2.workflow_checkpoints import (
     checkpoint_input as build_checkpoint_input,
     get_ai_checkpoint_result,
@@ -53,7 +64,6 @@ from productv2.workflow_logging import (
 )
 from productv2.workflow_paths import (
     database_path as resolve_database_path,
-    enroute_bestsellers_dir,
     model_profiles_dir,
     product_assets_dir,
     raw_data_dir,
@@ -78,7 +88,10 @@ class ListingWorkflowState(TypedDict, total=False):
     main_image_result: dict[str, Any]
     size_reference_result: dict[str, Any]
     enroute_reference_result: dict[str, Any]
+    enroute_learning_result: dict[str, Any]
     enroute_analysis_result: dict[str, Any]
+    wearing_style_selection_result: dict[str, Any]
+    wearing_generation_prompt_result: dict[str, Any]
     wearing_image_result: dict[str, Any]
     wearing_generation_attempt: int
     manual_review_request: dict[str, Any]
@@ -90,8 +103,11 @@ class ListingWorkflowState(TypedDict, total=False):
 
 
 MAX_WEARING_REGENERATE_ATTEMPTS = 3
-ENROUTE_CACHE_TARGET_COUNT = 5
-ENROUTE_LEARNING_CONCURRENCY = 5
+PROMPT_RETRY_REVIEW_ACTIONS = {REVIEW_ACTION_RECOMPILE_PROMPT}
+IMAGE_RETRY_REVIEW_ACTIONS = {REVIEW_ACTION_REGENERATE, *PROMPT_RETRY_REVIEW_ACTIONS}
+ENROUTE_LEARNING_TARGET_CACHE_SIZE = 5
+ENROUTE_LEARNING_INITIAL_BATCH_SIZE = 5
+ENROUTE_LEARNING_INCREMENTAL_BATCH_SIZE = 1
 APPROVED_STATUS = "done"
 
 
@@ -261,6 +277,9 @@ def _detect_size_reference(
 
     size_reference_result = {
         "status": "ok",
+        "is_product_qualified": detection.is_product_qualified,
+        "qualification_checks": _qualification_checks_from_detection(detection),
+        "failed_checks": detection.failed_checks,
         "can_judge_size": detection.can_judge_size,
         "image_numbers": detection.image_numbers,
         "size_reference_image_number": detection.size_reference_image_number,
@@ -274,6 +293,44 @@ def _detect_size_reference(
     if selected_images:
         size_reference_result["selected_images"] = selected_images
         set_extra("selected_product_images", selected_images)
+    size_reference_ready = _has_required_size_reference(size_reference_result)
+    failed_checks = [
+        str(item)
+        for item in size_reference_result.get("failed_checks", [])
+        if str(item).strip()
+    ]
+    if not size_reference_ready and "size_reference" not in failed_checks:
+        failed_checks.append("size_reference")
+    if not size_reference_result.get("is_product_qualified", True) and not failed_checks:
+        failed_checks.append("product_qualification")
+    if failed_checks or not size_reference_ready:
+        size_reference_result["status"] = "failed"
+        size_reference_result["is_product_qualified"] = False
+        size_reference_result["failed_checks"] = failed_checks
+        qualification_checks = dict(size_reference_result.get("qualification_checks") or {})
+        if not size_reference_ready:
+            qualification_checks["size_reference"] = {
+                "passed": False,
+                "reason": (
+                    size_reference_result.get("reason")
+                    or "未检测到可用于判断尺寸比例的佩戴或人体参照图"
+                ),
+                "image_numbers": size_reference_result.get("image_numbers", []),
+                "size_reference_image_number": size_reference_result.get(
+                    "size_reference_image_number"
+                ),
+            }
+        size_reference_result["qualification_checks"] = qualification_checks
+        size_reference_result["failure_type"] = "product_unqualified"
+        size_reference_result["failure_detail"] = (
+            "size_reference_unusable"
+            if "size_reference" in failed_checks
+            else failed_checks[0]
+        )
+        size_reference_result["reason"] = (
+            size_reference_result.get("reason")
+            or "未检测到可用于判断尺寸比例的佩戴或人体参照图"
+        )
     set_extra("size_reference_detection", size_reference_result)
     return with_ai_checkpoint(
         state,
@@ -290,7 +347,7 @@ def _size_reference_next_step(
     logger: WorkflowRunLogger | None = None,
 ) -> str:
     if state.get("size_reference_result", {}).get("status") == "failed":
-        branch = "retry_load_candidates"
+        branch = "mark_failed_and_reload_candidates"
     elif state.get("size_reference_result", {}).get("status") == "ok":
         branch = "select_enroute_reference"
     else:
@@ -298,6 +355,36 @@ def _size_reference_next_step(
     if logger is not None:
         log_branch_decision(logger, "detect_size_reference", branch, state)
     return branch
+
+
+def _has_required_size_reference(size_reference_result: dict[str, Any]) -> bool:
+    selected_images = size_reference_result.get("selected_images", {})
+    if not isinstance(selected_images, dict):
+        return False
+    return (
+        bool(size_reference_result.get("can_judge_size"))
+        and bool(size_reference_result.get("size_reference_image_number"))
+        and bool((selected_images.get("main_image") or {}).get("path"))
+        and bool((selected_images.get("size_reference_image") or {}).get("path"))
+    )
+
+
+def _qualification_checks_from_detection(detection: Any) -> dict[str, Any]:
+    checks = dict(getattr(detection, "qualification_checks", {}) or {})
+    checks.setdefault(
+        "size_reference",
+        {
+            "passed": bool(getattr(detection, "can_judge_size", False)),
+            "image_numbers": list(getattr(detection, "image_numbers", []) or []),
+            "size_reference_image_number": getattr(
+                detection,
+                "size_reference_image_number",
+                None,
+            ),
+            "reason": str(getattr(detection, "reason", "") or ""),
+        },
+    )
+    return checks
 
 
 def _selected_product_images(
@@ -351,11 +438,15 @@ def _select_enroute_reference(state: ListingWorkflowState) -> ListingWorkflowSta
             }
         }
 
-    category, references = list_enroute_wearing_references(
+    database_path = resolve_database_path(state)
+    plan = plan_enroute_learning_for_candidate(
         candidates[0],
-        library_dir=enroute_bestsellers_dir(state),
+        database_path=database_path,
+        target_cache_size=ENROUTE_LEARNING_TARGET_CACHE_SIZE,
+        initial_batch_size=ENROUTE_LEARNING_INITIAL_BATCH_SIZE,
+        incremental_batch_size=ENROUTE_LEARNING_INCREMENTAL_BATCH_SIZE,
     )
-    if category is None or not references:
+    if plan.category is None or not plan.references:
         result = {
             "status": "skipped",
             "reason": "no_matching_enroute_reference",
@@ -363,34 +454,26 @@ def _select_enroute_reference(state: ListingWorkflowState) -> ListingWorkflowSta
         set_extra("enroute_reference_selection", result)
         return {"enroute_reference_result": result}
 
-    cached = _valid_enroute_analysis_cache(resolve_database_path(state), category)
-    cached_ids = {str(row.get("enroute_product_id") or "") for row in cached}
-    unlearned = [
-        reference for reference in references if reference.product_id not in cached_ids
-    ]
-    learning_limit = (
-        min(ENROUTE_CACHE_TARGET_COUNT, len(unlearned))
-        if len(cached) < ENROUTE_CACHE_TARGET_COUNT
-        else min(1, len(unlearned))
-    )
-    learning_references = unlearned[:learning_limit]
     result = {
         "status": "ok",
-        "category": category,
-        "reference_count": len(references),
-        "cached_analysis_count": len(cached),
-        "unlearned_count": len(unlearned),
-        "learning_count": len(learning_references),
+        "category": plan.category,
+        "reference_count": len(plan.references),
+        "reference_source": "database",
+        "cached_analysis_count": plan.cached_analysis_count,
+        "unlearned_count": len(plan.unlearned_rows),
+        "learning_count": len(plan.learning_rows),
+        "cache_status_synced_count": plan.cache_status_synced_count,
         "learning_references": [
-            _enroute_reference_payload(reference)
-            for reference in learning_references
+            _enroute_reference_payload(reference_from_learning_row(row))
+            for row in plan.learning_rows
         ],
+        "learning_reference_rows": plan.learning_rows,
     }
     set_extra("enroute_reference_selection", result)
     return {"enroute_reference_result": result}
 
 
-def _analyze_enroute_reference(
+def _learn_enroute_profiles(
     state: ListingWorkflowState,
     logger: WorkflowRunLogger | None = None,
 ) -> ListingWorkflowState:
@@ -400,8 +483,8 @@ def _analyze_enroute_reference(
             "status": "skipped",
             "reason": enroute_reference_result.get("reason", "reference_not_ready"),
         }
-        set_extra("enroute_reference_analysis", result)
-        return {"enroute_analysis_result": result}
+        set_extra("enroute_profile_learning", result)
+        return {"enroute_learning_result": result}
 
     database_path = resolve_database_path(state)
     category = str(enroute_reference_result.get("category") or "")
@@ -410,54 +493,86 @@ def _analyze_enroute_reference(
             "status": "skipped",
             "reason": "enroute_category_missing",
         }
-        set_extra("enroute_reference_analysis", result)
-        return {"enroute_analysis_result": result}
+        set_extra("enroute_profile_learning", result)
+        return {"enroute_learning_result": result}
 
-    model_profiles = load_model_profiles(database_path)
-    learning_references = [
-        EnrouteReference(
-            product_id=str(item.get("enroute_product_id") or ""),
-            category=str(item.get("category") or category),
-            product_dir=Path(str(item.get("product_dir") or "")),
-            image_path=Path(str(item.get("image_path") or "")),
-            metadata=dict(item.get("metadata") or {}),
-        )
-        for item in enroute_reference_result.get("learning_references", [])
-        if isinstance(item, dict)
-    ]
-    learning_outputs: list[dict[str, Any]] = []
-    checkpoint_state: ListingWorkflowState = state
+    learning_references = _learning_references_from_result(
+        enroute_reference_result,
+        category,
+    )
     if learning_references:
-        checkpoint_state, learning_outputs = _learn_enroute_references(
-            checkpoint_state,
+        _learn_enroute_references(
+            state,
             database_path=database_path,
             references=learning_references,
-            model_profiles=model_profiles,
             logger=logger,
         )
 
-    cached = _valid_enroute_analysis_cache(database_path, category)
+    cached = valid_enroute_analysis_cache(database_path, category)
+    result = {
+        "status": "ok",
+        "category": category,
+        "learning_count": len(learning_references),
+        "cached_analysis_count_after_learning": len(cached),
+    }
+    set_extra("enroute_profile_learning", result)
+    return merge_checkpoint_update(
+        state,
+        {
+            "enroute_learning_result": result,
+            "enroute_reference_result": {
+                **enroute_reference_result,
+                "cached_analysis_count_after_learning": len(cached),
+            },
+        },
+    )
+
+
+def _select_wearing_style_profile(
+    state: ListingWorkflowState,
+    logger: WorkflowRunLogger | None = None,
+) -> ListingWorkflowState:
+    enroute_reference_result = state.get("enroute_reference_result", {})
+    if enroute_reference_result.get("status") != "ok":
+        result = {
+            "status": "skipped",
+            "reason": enroute_reference_result.get("reason", "reference_not_ready"),
+        }
+        set_extra("wearing_style_profile_selection", result)
+        return {
+            "wearing_style_selection_result": result,
+            "enroute_analysis_result": result,
+        }
+
+    database_path = resolve_database_path(state)
+    category = str(enroute_reference_result.get("category") or "")
+    if not category:
+        result = {
+            "status": "skipped",
+            "reason": "enroute_category_missing",
+        }
+        set_extra("wearing_style_profile_selection", result)
+        return {
+            "wearing_style_selection_result": result,
+            "enroute_analysis_result": result,
+        }
+
+    cached = valid_enroute_analysis_cache(database_path, category)
     if not cached:
         result = {
             "status": "skipped",
             "reason": "no_cached_enroute_analysis",
             "category": category,
-            "learning_results": learning_outputs,
         }
-        set_extra("enroute_reference_analysis", result)
-        return merge_checkpoint_update(
-            checkpoint_state,
-            {
-                "enroute_analysis_result": result,
-                "enroute_reference_result": {
-                    **enroute_reference_result,
-                    "learning_results": learning_outputs,
-                    "cached_analysis_count_after_learning": 0,
-                },
-            },
-        )
+        set_extra("wearing_style_profile_selection", result)
+        return {
+            "wearing_style_selection_result": result,
+            "enroute_analysis_result": result,
+        }
 
-    summaries = _enroute_cache_summaries(cached)
+    enroute_summaries = _enroute_cache_summaries(cached)
+    model_profiles = load_model_profiles(database_path)
+    model_summaries = _model_profile_summaries(model_profiles)
     selected_images = (
         state.get("size_reference_result", {}).get("selected_images", {})
         if isinstance(state.get("size_reference_result"), dict)
@@ -472,38 +587,34 @@ def _analyze_enroute_reference(
             "status": "skipped",
             "reason": "selected_product_images_missing",
             "category": category,
-            "learning_results": learning_outputs,
         }
-        set_extra("enroute_reference_analysis", result)
-        return merge_checkpoint_update(
-            checkpoint_state,
-            {"enroute_analysis_result": result},
-        )
+        set_extra("wearing_style_profile_selection", result)
+        return {
+            "wearing_style_selection_result": result,
+            "enroute_analysis_result": result,
+        }
 
-    checkpoint_key = "select_enroute_analysis"
+    checkpoint_key = "select_wearing_style_profile"
     checkpoint_input = build_checkpoint_input(
         main_image_path=main_image_path,
         size_reference_image_path=size_reference_image_path,
-        analysis_summaries=summaries,
+        enroute_profile_summaries=enroute_summaries,
+        model_profile_summaries=model_summaries,
     )
     cached_checkpoint = get_ai_checkpoint_result(
-        checkpoint_state,
+        state,
         checkpoint_key,
         checkpoint_input,
     )
     if cached_checkpoint is not None:
         result = dict(cached_checkpoint)
         result["checkpoint"] = "hit"
-        set_extra("enroute_reference_analysis", result)
+        set_extra("wearing_style_profile_selection", result)
         return with_ai_checkpoint(
-            checkpoint_state,
+            state,
             {
+                "wearing_style_selection_result": result,
                 "enroute_analysis_result": result,
-                "enroute_reference_result": {
-                    **enroute_reference_result,
-                    "learning_results": learning_outputs,
-                    "cached_analysis_count_after_learning": len(cached),
-                },
             },
             checkpoint_key=checkpoint_key,
             checkpoint_input=checkpoint_input,
@@ -511,12 +622,13 @@ def _analyze_enroute_reference(
             source="state_hit",
         )
 
-    selection = select_enroute_analysis_from_summaries(
+    selection = select_wearing_style_profile(
         main_image_path,
         size_reference_image_path,
-        summaries,
+        enroute_summaries,
+        model_summaries,
         **_kwargs_with_optional_logger(
-            select_enroute_analysis_from_summaries,
+            select_wearing_style_profile,
             logger=logger,
             database_path=database_path,
         ),
@@ -536,19 +648,29 @@ def _analyze_enroute_reference(
             "Selected Enroute analysis is not in cache: "
             f"{selected_id or '<empty>'}"
         )
+    selected_model = _find_model_profile(
+        model_profiles,
+        selection.selected_model_profile_key,
+    )
+    if selected_model is None:
+        raise ValueError(
+            "Selected model profile is not in model_profiles: "
+            f"{selection.selected_model_profile_key or '<empty>'}"
+        )
 
     result = {
         "status": "ok",
         "cache": "selected",
         "reference_image_path": selected["image_path"],
+        "enroute_reference_image_path": selected["image_path"],
         "enroute_product_id": selected["enroute_product_id"],
         "category": selected["enroute_category"],
         "summary": selected["summary"],
         "analysis": selected["analysis_json"],
+        "selected_model_profile": selected_model,
         "selection": selection.model_dump(),
-        "learning_results": learning_outputs,
     }
-    set_extra("enroute_reference_analysis", result)
+    set_extra("wearing_style_profile_selection", result)
     set_extra("selected_enroute_reference_image_path", selected["image_path"])
     set_extra(
         "enroute_reference_selection",
@@ -557,19 +679,20 @@ def _analyze_enroute_reference(
             "selected_enroute_product_id": selected["enroute_product_id"],
             "selected_image_path": selected["image_path"],
             "selection_reason": selection.reason,
+            "selected_model_profile_key": selection.selected_model_profile_key,
         },
     )
     return with_ai_checkpoint(
-        checkpoint_state,
+        state,
         {
+            "wearing_style_selection_result": result,
             "enroute_analysis_result": result,
             "enroute_reference_result": {
                 **enroute_reference_result,
                 "selected_enroute_product_id": selected["enroute_product_id"],
                 "selected_image_path": selected["image_path"],
                 "selection_reason": selection.reason,
-                "learning_results": learning_outputs,
-                "cached_analysis_count_after_learning": len(cached),
+                "selected_model_profile_key": selection.selected_model_profile_key,
             },
         },
         checkpoint_key=checkpoint_key,
@@ -579,20 +702,100 @@ def _analyze_enroute_reference(
     )
 
 
-def _analysis_has_model_selection(analysis_json: dict[str, Any]) -> bool:
-    selected = analysis_json.get("selected_model_profile")
-    return isinstance(selected, dict) and bool(selected.get("profile_key"))
-
-
-def _valid_enroute_analysis_cache(
-    database_path: str | Path,
-    category: str,
-) -> list[dict[str, Any]]:
-    return [
-        row
-        for row in list_enroute_image_analyses_by_category(database_path, category)
-        if _analysis_has_model_selection(row.get("analysis_json", {}))
+def _compile_wearing_generation_prompt(
+    state: ListingWorkflowState,
+    logger: WorkflowRunLogger | None = None,
+) -> ListingWorkflowState:
+    candidates = [
+        CandidateProduct.model_validate(candidate)
+        for candidate in state.get("candidates", [])
     ]
+    if not candidates:
+        return {
+            "wearing_generation_prompt_result": {
+                "status": "skipped",
+                "reason": "no_candidate",
+            }
+        }
+
+    selection_result = state.get("wearing_style_selection_result", {})
+    if selection_result.get("status") != "ok":
+        result = {
+            "status": "skipped",
+            "reason": selection_result.get("reason", "style_profile_not_ready"),
+        }
+        set_extra("wearing_generation_prompt", result)
+        return {"wearing_generation_prompt_result": result}
+
+    enroute_profile = _enroute_profile_from_selection(selection_result)
+    model_profile = dict(selection_result.get("selected_model_profile") or {})
+    if not enroute_profile or not model_profile:
+        result = {
+            "status": "skipped",
+            "reason": "selected_enroute_or_model_profile_missing",
+        }
+        set_extra("wearing_generation_prompt", result)
+        return {"wearing_generation_prompt_result": result}
+
+    checkpoint_key = "compile_wearing_generation_prompt"
+    checkpoint_input = build_checkpoint_input(
+        product=selected_product_identity(state),
+        size_reference_result=state.get("size_reference_result", {}),
+        wearing_style_selection_result=selection_result,
+        product_assets_dir=str(
+            product_asset_dir(candidates[0], product_assets_dir(state))
+        ),
+    )
+    review_action = str(
+        state.get("manual_review_decision", {}).get("action") or ""
+    ).lower()
+    cached = (
+        None
+        if review_action in PROMPT_RETRY_REVIEW_ACTIONS
+        else get_ai_checkpoint_result(state, checkpoint_key, checkpoint_input)
+    )
+    if cached is not None:
+        result = dict(cached)
+        missing = [
+            path
+            for path in result.get("input_images", [])
+            if path and not Path(str(path)).is_file()
+        ]
+        if not missing:
+            result["checkpoint"] = "hit"
+            set_extra("wearing_generation_prompt", result)
+            return with_ai_checkpoint(
+                state,
+                {"wearing_generation_prompt_result": result},
+                checkpoint_key=checkpoint_key,
+                checkpoint_input=checkpoint_input,
+                checkpoint_result=result,
+                source="state_hit",
+            )
+
+    result = compile_wearing_generation_prompt(
+        candidates[0],
+        state.get("size_reference_result", {}),
+        enroute_profile,
+        model_profile,
+        selection_reason=str(
+            (selection_result.get("selection") or {}).get("reason")
+            or selection_result.get("reason")
+            or ""
+        ),
+        output_dir=product_asset_dir(candidates[0], product_assets_dir(state)),
+        logger=logger,
+        database_path=resolve_database_path(state),
+    )
+    set_extra("wearing_generation_prompt", result)
+    return with_ai_checkpoint(
+        state,
+        {"wearing_generation_prompt_result": result},
+        checkpoint_key=checkpoint_key,
+        checkpoint_input=checkpoint_input,
+        checkpoint_result=result,
+        source="llm_compiler",
+    )
 
 
 def _learn_enroute_references(
@@ -600,89 +803,64 @@ def _learn_enroute_references(
     *,
     database_path: str | Path,
     references: list[EnrouteReference],
-    model_profiles: list[dict[str, Any]],
     logger: WorkflowRunLogger | None = None,
-) -> tuple[ListingWorkflowState, list[dict[str, Any]]]:
-    checkpoint_state = state
+) -> list[dict[str, Any]]:
     outputs: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(
-        max_workers=min(ENROUTE_LEARNING_CONCURRENCY, len(references))
-    ) as executor:
-        future_map = {
-            executor.submit(
-                _learn_one_enroute_reference,
-                checkpoint_state,
-                database_path,
-                reference,
-                model_profiles,
-                logger,
-            ): reference
-            for reference in references
-        }
-        for future in as_completed(future_map):
-            result, checkpoint_key, checkpoint_input, source = future.result()
-            outputs.append(result)
-            checkpoint_state = with_ai_checkpoint(
-                checkpoint_state,
-                {},
-                checkpoint_key=checkpoint_key,
-                checkpoint_input=checkpoint_input,
-                checkpoint_result=result,
-                source=source,
-            )
-    outputs.sort(key=lambda item: str(item.get("enroute_product_id") or ""))
-    return checkpoint_state, outputs
+    for reference in references:
+        result = _learn_one_enroute_reference(
+            state,
+            database_path,
+            reference,
+            logger,
+        )
+        outputs.append(result)
+    return outputs
 
 
 def _learn_one_enroute_reference(
     state: ListingWorkflowState,
     database_path: str | Path,
     reference: EnrouteReference,
-    model_profiles: list[dict[str, Any]],
     logger: WorkflowRunLogger | None,
-) -> tuple[dict[str, Any], str, dict[str, Any], str]:
-    checkpoint_key = _enroute_learning_checkpoint_key(reference)
-    checkpoint_input = build_checkpoint_input(
-        reference_image_path=str(reference.image_path),
-        enroute_product_id=reference.product_id,
-        category=reference.category,
-        model_profiles=[
-            {
-                "profile_key": profile.get("profile_key", ""),
-                "name": profile.get("name", ""),
-                "image_path": profile.get("image_path", ""),
-            }
-            for profile in model_profiles
-        ],
-    )
-    cached_checkpoint = get_ai_checkpoint_result(
-        state,
-        checkpoint_key,
-        checkpoint_input,
-    )
-    if cached_checkpoint is not None:
-        result = dict(cached_checkpoint)
-        result["checkpoint"] = "hit"
-        return result, checkpoint_key, checkpoint_input, "state_hit"
-
+) -> dict[str, Any]:
     cached = get_enroute_image_analysis(database_path, reference.product_id)
-    if cached is not None and _analysis_has_model_selection(cached["analysis_json"]):
+    if cached is not None and enroute_analysis_is_valid_profile(cached["analysis_json"]):
+        mark_enroute_reference_learned(
+            database_path,
+            reference,
+            analysis_id=int(cached["id"]),
+            workflow_log_path=str(state.get("workflow_log_path") or ""),
+        )
         result = _enroute_cached_analysis_result(cached, cache="hit")
-        return result, checkpoint_key, checkpoint_input, "database_cache"
+        return result
 
-    analysis = analyze_enroute_reference_image(
-        reference.image_path,
-        **_kwargs_with_optional_logger(
-            analyze_enroute_reference_image,
-            logger=logger,
-            model_profiles=model_profiles,
-            database_path=database_path,
-        ),
+    workflow_log_path = str(state.get("workflow_log_path") or "")
+    mark_enroute_reference_learning(
+        database_path,
+        reference,
+        workflow_log_path=workflow_log_path,
     )
+    try:
+        analysis = analyze_enroute_reference_image(
+            reference.image_path,
+            **_kwargs_with_optional_logger(
+                analyze_enroute_reference_image,
+                logger=logger,
+                database_path=database_path,
+            ),
+        )
+    except Exception as exc:
+        mark_enroute_reference_failed(
+            database_path,
+            reference,
+            error=f"{type(exc).__name__}: {exc}",
+            workflow_log_path=workflow_log_path,
+        )
+        raise
 
     analysis_json = analysis.model_dump()
     metadata = reference.metadata
-    upsert_enroute_image_analysis(
+    cached_analysis = upsert_enroute_image_analysis(
         database_path,
         enroute_product_id=reference.product_id,
         enroute_category=reference.category,
@@ -691,7 +869,13 @@ def _learn_one_enroute_reference(
         image_path=str(reference.image_path),
         image_position=2,
         analysis_json=analysis_json,
-        summary=analysis.summary,
+        summary=summarize_enroute_profile(analysis_json),
+    )
+    mark_enroute_reference_learned(
+        database_path,
+        reference,
+        analysis_id=int(cached_analysis["id"]),
+        workflow_log_path=workflow_log_path,
     )
     result = {
         "status": "ok",
@@ -699,10 +883,10 @@ def _learn_one_enroute_reference(
         "reference_image_path": str(reference.image_path),
         "enroute_product_id": reference.product_id,
         "category": reference.category,
-        "summary": analysis.summary,
+        "summary": summarize_enroute_profile(analysis_json),
         "analysis": analysis_json,
     }
-    return result, checkpoint_key, checkpoint_input, "llm"
+    return result
 
 
 def _enroute_cached_analysis_result(
@@ -731,6 +915,47 @@ def _enroute_cache_summaries(cached_rows: list[dict[str, Any]]) -> list[dict[str
     ]
 
 
+def _model_profile_summaries(model_profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "profile_key": str(profile.get("profile_key") or ""),
+            "name": str(profile.get("name") or ""),
+            "summary": str(profile.get("summary") or ""),
+            "image_path": str(profile.get("image_path") or ""),
+        }
+        for profile in model_profiles
+        if str(profile.get("profile_key") or "")
+    ]
+
+
+def _find_model_profile(
+    model_profiles: list[dict[str, Any]],
+    profile_key: str,
+) -> dict[str, Any] | None:
+    selected_key = str(profile_key or "")
+    for profile in model_profiles:
+        if str(profile.get("profile_key") or "") == selected_key:
+            return dict(profile)
+    return None
+
+
+def _enroute_profile_from_selection(selection_result: dict[str, Any]) -> dict[str, Any]:
+    analysis = selection_result.get("analysis")
+    if not isinstance(analysis, dict):
+        return {}
+    return {
+        "enroute_product_id": str(selection_result.get("enroute_product_id") or ""),
+        "category": str(selection_result.get("category") or ""),
+        "summary": str(selection_result.get("summary") or ""),
+        "image_path": str(
+            selection_result.get("reference_image_path")
+            or selection_result.get("enroute_reference_image_path")
+            or ""
+        ),
+        "analysis": analysis,
+    }
+
+
 def _enroute_reference_payload(reference: EnrouteReference) -> dict[str, Any]:
     metadata = reference.metadata
     return {
@@ -747,11 +972,29 @@ def _enroute_reference_payload(reference: EnrouteReference) -> dict[str, Any]:
     }
 
 
-def _enroute_learning_checkpoint_key(reference: EnrouteReference) -> str:
-    digest = hashlib.sha256(
-        f"{reference.category}:{reference.product_id}".encode("utf-8")
-    ).hexdigest()[:16]
-    return f"learn_enroute_reference_{digest}"
+def _learning_references_from_result(
+    enroute_reference_result: dict[str, Any],
+    category: str,
+) -> list[EnrouteReference]:
+    rows = [
+        item
+        for item in enroute_reference_result.get("learning_reference_rows", [])
+        if isinstance(item, dict)
+    ]
+    if rows:
+        return [reference_from_learning_row(row) for row in rows]
+
+    return [
+        EnrouteReference(
+            product_id=str(item.get("enroute_product_id") or ""),
+            category=str(item.get("category") or category),
+            product_dir=Path(str(item.get("product_dir") or "")),
+            image_path=Path(str(item.get("image_path") or "")),
+            metadata=dict(item.get("metadata") or {}),
+        )
+        for item in enroute_reference_result.get("learning_references", [])
+        if isinstance(item, dict)
+    ]
 
 
 def merge_checkpoint_update(
@@ -845,7 +1088,9 @@ def _generate_wearing_image(
 
     previous_result = state.get("wearing_image_result", {})
     review_decision = state.get("manual_review_decision", {})
-    should_regenerate = review_decision.get("action") == "regenerate"
+    should_regenerate = (
+        str(review_decision.get("action") or "").lower() in IMAGE_RETRY_REVIEW_ACTIONS
+    )
     next_attempt = int(state.get("wearing_generation_attempt") or 0) + 1
     if (
         not should_regenerate
@@ -866,8 +1111,10 @@ def _generate_wearing_image(
     checkpoint_input = build_checkpoint_input(
         product=selected_product_identity(state),
         attempt=next_attempt,
-        size_reference_result=state.get("size_reference_result", {}),
-        enroute_analysis_result=state.get("enroute_analysis_result", {}),
+        wearing_generation_prompt_result=state.get(
+            "wearing_generation_prompt_result",
+            {},
+        ),
         product_assets_dir=str(
             product_asset_dir(
                 candidates[0],
@@ -901,8 +1148,7 @@ def _generate_wearing_image(
 
     wearing_image_result = generate_wearing_image(
         candidates[0],
-        state.get("size_reference_result", {}),
-        state.get("enroute_analysis_result", {}),
+        state.get("wearing_generation_prompt_result", {}),
         product_asset_dir(
             candidates[0],
             product_assets_dir(state),
@@ -958,16 +1204,23 @@ def _route_manual_review_decision(
 ) -> str:
     decision = state.get("manual_review_decision", {})
     action = str(decision.get("action") or "").lower()
-    if action == "approve":
+    if action == REVIEW_ACTION_APPROVE:
         branch = "build_listing_drafts"
-    elif action == "regenerate":
+    elif action == REVIEW_ACTION_REGENERATE:
         attempt = int(state.get("wearing_generation_attempt") or 0)
         branch = (
             "generate_wearing_image"
             if attempt < MAX_WEARING_REGENERATE_ATTEMPTS
             else "mark_failed_and_reload_candidates"
         )
-    elif action == "reject":
+    elif action == REVIEW_ACTION_RECOMPILE_PROMPT:
+        attempt = int(state.get("wearing_generation_attempt") or 0)
+        branch = (
+            "compile_wearing_generation_prompt"
+            if attempt < MAX_WEARING_REGENERATE_ATTEMPTS
+            else "mark_failed_and_reload_candidates"
+        )
+    elif action == REVIEW_ACTION_REJECT:
         branch = "mark_failed_and_reload_candidates"
     else:
         branch = "mark_failed_and_reload_candidates"
@@ -979,9 +1232,14 @@ def _route_manual_review_decision(
 def _mark_failed_and_reload_candidates(
     state: ListingWorkflowState,
 ) -> ListingWorkflowState:
+    failure_reason = str(
+        state.get("manual_review_decision", {}).get("reason")
+        or state.get("size_reference_result", {}).get("reason")
+        or ""
+    )
     failed_product = _mark_current_candidate_failed(
         state,
-        reason=str(state.get("manual_review_decision", {}).get("reason") or ""),
+        reason=failure_reason,
     )
     return {
         "candidates": [],
@@ -989,6 +1247,7 @@ def _mark_failed_and_reload_candidates(
         "failed_product": failed_product,
         "manual_review_request": {},
         "manual_review_decision": {},
+        "size_reference_result": {},
         "wearing_image_result": {},
         "wearing_generation_attempt": 0,
     }
@@ -1031,8 +1290,18 @@ def _prepare_review_queue(state: ListingWorkflowState) -> ListingWorkflowState:
         existing_metrics["enroute_reference_result"] = state[
             "enroute_reference_result"
         ]
+    if state.get("enroute_learning_result"):
+        existing_metrics["enroute_learning_result"] = state["enroute_learning_result"]
     if state.get("enroute_analysis_result"):
         existing_metrics["enroute_analysis_result"] = state["enroute_analysis_result"]
+    if state.get("wearing_style_selection_result"):
+        existing_metrics["wearing_style_selection_result"] = state[
+            "wearing_style_selection_result"
+        ]
+    if state.get("wearing_generation_prompt_result"):
+        existing_metrics["wearing_generation_prompt_result"] = state[
+            "wearing_generation_prompt_result"
+        ]
     if state.get("wearing_image_result"):
         existing_metrics["wearing_image_result"] = state["wearing_image_result"]
     if state.get("ai_checkpoints"):
@@ -1075,10 +1344,28 @@ def build_listing_graph(logger: WorkflowRunLogger | None = None):
         _node("select_enroute_reference", _select_enroute_reference, logger),
     )
     workflow.add_node(
-        "analyze_enroute_reference",
+        "learn_enroute_profiles",
         _node(
-            "analyze_enroute_reference",
-            _analyze_enroute_reference,
+            "learn_enroute_profiles",
+            _learn_enroute_profiles,
+            logger,
+            pass_logger=True,
+        ),
+    )
+    workflow.add_node(
+        "select_wearing_style_profile",
+        _node(
+            "select_wearing_style_profile",
+            _select_wearing_style_profile,
+            logger,
+            pass_logger=True,
+        ),
+    )
+    workflow.add_node(
+        "compile_wearing_generation_prompt",
+        _node(
+            "compile_wearing_generation_prompt",
+            _compile_wearing_generation_prompt,
             logger,
             pass_logger=True,
         ),
@@ -1115,19 +1402,25 @@ def build_listing_graph(logger: WorkflowRunLogger | None = None):
         "detect_size_reference",
         _route("detect_size_reference", _size_reference_next_step, logger),
         {
-            "retry_load_candidates": "load_candidates",
+            "mark_failed_and_reload_candidates": "mark_failed_and_reload_candidates",
             "select_enroute_reference": "select_enroute_reference",
             "build_listing_drafts": "build_listing_drafts",
         },
     )
-    workflow.add_edge("select_enroute_reference", "analyze_enroute_reference")
-    workflow.add_edge("analyze_enroute_reference", "generate_wearing_image")
+    workflow.add_edge("select_enroute_reference", "learn_enroute_profiles")
+    workflow.add_edge("learn_enroute_profiles", "select_wearing_style_profile")
+    workflow.add_edge(
+        "select_wearing_style_profile",
+        "compile_wearing_generation_prompt",
+    )
+    workflow.add_edge("compile_wearing_generation_prompt", "generate_wearing_image")
     workflow.add_edge("generate_wearing_image", "wait_manual_review")
     workflow.add_conditional_edges(
         "wait_manual_review",
         _route("wait_manual_review", _route_manual_review_decision, logger),
         {
             "build_listing_drafts": "build_listing_drafts",
+            "compile_wearing_generation_prompt": "compile_wearing_generation_prompt",
             "generate_wearing_image": "generate_wearing_image",
             "mark_failed_and_reload_candidates": "mark_failed_and_reload_candidates",
         },

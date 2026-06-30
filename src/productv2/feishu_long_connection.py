@@ -17,6 +17,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from productv2.config import Settings
+from productv2.manual_review import MANUAL_REVIEW_ACTIONS
 
 
 ReviewActionHandler = Callable[[dict[str, str]], dict[str, Any]]
@@ -144,7 +145,7 @@ def extract_card_review_action(
     if not isinstance(value, dict):
         value = _dict_value(payload.get("value"))
     action = str(value.get("action") or "").lower()
-    if action not in {"approve", "regenerate", "reject"}:
+    if action not in MANUAL_REVIEW_ACTIONS:
         return None
     thread_id = str(value.get("thread_id") or "")
     if not thread_id:
@@ -388,6 +389,7 @@ def _review_action_style(action: str) -> tuple[str, str]:
     styles = {
         "approve": ("通过", "green"),
         "regenerate": ("重生成", "orange"),
+        "recompile_prompt": ("重编排提示词", "orange"),
         "reject": ("拒绝", "red"),
     }
     return styles.get(action, ("已处理", "blue"))
@@ -397,6 +399,7 @@ def _success_message(action: str) -> str:
     labels = {
         "approve": "已提交通过。",
         "regenerate": "已提交重生成。",
+        "recompile_prompt": "已提交重编排提示词。",
         "reject": "已提交拒绝。",
     }
     return labels.get(action, "已提交审核动作。")

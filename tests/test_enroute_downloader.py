@@ -106,6 +106,83 @@ def test_download_category_stops_between_target_and_max_images(
     assert len(metadata["downloaded_images"]) == 2
 
 
+def test_download_category_reference_only_counts_saved_products(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    downloader = load_downloader_module()
+    products = [
+        {
+            "id": 1,
+            "title": "First",
+            "handle": "first",
+            "images": [
+                {"position": 1, "src": "https://example.test/1.jpg"},
+                {"position": 2, "src": "https://example.test/2.jpg"},
+                {"position": 3, "src": "https://example.test/3.jpg"},
+            ],
+        },
+        {
+            "id": 2,
+            "title": "Second",
+            "handle": "second",
+            "images": [
+                {"position": 1, "src": "https://example.test/4.jpg"},
+                {"position": 2, "src": "https://example.test/5.jpg"},
+            ],
+        },
+        {
+            "id": 3,
+            "title": "Third",
+            "handle": "third",
+            "images": [
+                {"position": 1, "src": "https://example.test/6.jpg"},
+                {"position": 2, "src": "https://example.test/7.jpg"},
+            ],
+        },
+    ]
+
+    monkeypatch.setattr(
+        downloader,
+        "iter_best_selling_products",
+        lambda client, category, page_size: iter(products),
+    )
+
+    def fake_download_image_as_jpeg(client, source_url, output_path, force=False):
+        Image.new("RGB", (16, 16), "white").save(output_path)
+        return {"status": "downloaded", "width": 16, "height": 16}
+
+    monkeypatch.setattr(
+        downloader,
+        "download_image_as_jpeg",
+        fake_download_image_as_jpeg,
+    )
+
+    summary = downloader.download_category(
+        client=object(),
+        category="necklaces",
+        output_dir=tmp_path,
+        target_products_per_category=2,
+        max_products_per_category=3,
+        reference_only=True,
+    )
+
+    assert summary.category == "necklaces"
+    assert summary.downloaded_images == 2
+    assert summary.products_seen == 2
+    assert summary.products_saved == 2
+    assert (tmp_path / "necklaces" / "01-first" / "02.jpg").exists()
+    assert not (tmp_path / "necklaces" / "01-first" / "01.jpg").exists()
+    assert not (tmp_path / "necklaces" / "01-first" / "03.jpg").exists()
+    metadata = json.loads(
+        (tmp_path / "necklaces" / "01-first" / "metadata.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metadata["downloaded_images"][0]["local_file"] == "02.jpg"
+    assert metadata["downloaded_images"][0]["source_url"] == "https://example.test/2.jpg"
+
+
 def test_validate_image_bounds_rejects_invalid_values() -> None:
     downloader = load_downloader_module()
 
@@ -115,3 +192,14 @@ def test_validate_image_bounds_rejects_invalid_values() -> None:
         assert "target-images-per-category" in str(exc)
     else:
         raise AssertionError("Expected invalid image bounds to raise ValueError")
+
+
+def test_validate_product_bounds_rejects_invalid_values() -> None:
+    downloader = load_downloader_module()
+
+    try:
+        downloader.validate_product_bounds(70, 60, 100)
+    except ValueError as exc:
+        assert "target-products-per-category" in str(exc)
+    else:
+        raise AssertionError("Expected invalid product bounds to raise ValueError")

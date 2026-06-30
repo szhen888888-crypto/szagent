@@ -24,27 +24,27 @@ class PromptAccessError(ValueError):
 PROMPT_METADATA: dict[str, dict[str, Any]] = {
     "vision/size_reference": {
         "order": 1,
-        "label": "尺寸参考识别",
+        "label": "产品合格性检测",
         "node": "detect_size_reference",
-        "purpose": "检查商品主图拼图，判断哪张子图能用人体参照判断尺寸，并选出尺寸参考图与产品主图编号。",
+        "purpose": "检查商品主图拼图，判断当前素材是否合格进入后续生图；当前硬规则是必须有可判断尺寸比例的真人或人体参照，并选出尺寸参考图与产品主图编号。",
     },
     "reference_analysis/enroute_reference": {
         "order": 2,
-        "label": "Enroute 逆向分析",
-        "node": "analyze_enroute_reference",
-        "purpose": "逆向同类目 Enroute 佩戴图，提炼模特、服装、场景和拍摄风格，并选择固定虚拟模特。",
+        "label": "Enroute profile 学习",
+        "node": "learn_enroute_profiles",
+        "purpose": "逆向同类目 Enroute 02.jpg，提炼人物摄影、构图、服装、场景和光线 profile，不选择固定模特。",
     },
-    "reference_analysis/enroute_selection": {
+    "wearing/style_profile_selection": {
         "order": 3,
-        "label": "Enroute 参考选择",
-        "node": "analyze_enroute_reference",
-        "purpose": "用当前产品主图与尺寸参考图，从已逆向的缓存摘要中选出最适配的一条风格参考。",
+        "label": "风格与模特选择",
+        "node": "select_wearing_style_profile",
+        "purpose": "用当前产品主图、尺寸参考图、Enroute profile 摘要和固定模特摘要，选择一条风格 profile 和一个模特 profile。",
     },
-    "wearing/generate_wearing_image": {
+    "wearing/compile_generation_prompt": {
         "order": 4,
-        "label": "穿戴图生成",
-        "node": "generate_wearing_image",
-        "purpose": "综合产品图、尺寸参考、固定模特与逆向风格，生成 inyourday 风格的首饰佩戴图提示词。",
+        "label": "生图提示词编排",
+        "node": "compile_wearing_generation_prompt",
+        "purpose": "加载实际 Enroute profile、固定模特 profile、产品主图和尺寸图，编译最终图片生成 prompt。",
     },
     "experiments/enroute_reverse_human": {
         "order": 99,

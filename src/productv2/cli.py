@@ -16,7 +16,6 @@ from productv2.db import (
     RAW_IMPORT_STATUS,
     import_raw_data_directory,
     init_database,
-    reset_ai_call_locks,
     reset_products_for_processing,
     seed_candidate_products,
 )
@@ -204,7 +203,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             database_path=database_path,
             status=args.status,
         )
-        summary.update(reset_ai_call_locks(database_path=database_path))
         _progress(
             f"重置完成：{summary['products_reset']} 条产品，状态={summary['status']}"
         )
@@ -313,7 +311,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     raise SystemExit(
-        "主 workflow 已迁移到 langgraph dev。请使用：uv run langgraph dev --allow-blocking"
+        "主 workflow 已迁移到 langgraph dev。请使用：uv run langgraph dev --allow-blocking --no-reload"
     )
 
 
@@ -453,7 +451,8 @@ def restart_workflow_via_api(
                 "skipped_threads": skipped_threads,
                 "message": (
                     "存在等待人工审核的 thread，安全恢复未自动继续。"
-                    "请在任务详情中提交 approve / regenerate / reject。"
+                    "请在任务详情中提交 approve / regenerate / "
+                    "recompile_prompt / reject。"
                 ),
             }
         try:
@@ -560,7 +559,8 @@ def _restart_selected_thread_via_api(
             "summary": summary,
             "message": (
                 "当前选中的 thread 正在等待人工审核。"
-                "请在任务详情中提交 approve / regenerate / reject。"
+                "请在任务详情中提交 approve / regenerate / "
+                "recompile_prompt / reject。"
             ),
         }
     try:
@@ -636,11 +636,12 @@ def list_workflow_threads_via_api(
             state_error = ""
             try:
                 state = _api_get_json(base_url, f"/threads/{thread_id}/state")
-                summary = _summarize_thread_state(state)
+                runs = _safe_list_thread_runs(base_url, thread_id)
+                summary = _summarize_thread_state(state, runs=runs)
                 progress = _summarize_thread_progress(
                     state=state,
                     thread=thread,
-                    runs=_safe_list_thread_runs(base_url, thread_id),
+                    runs=runs,
                 )
             except SystemExit as exc:
                 state_error = str(exc)
@@ -754,7 +755,11 @@ def _thread_matches_assistant(
     )
 
 
-def _summarize_thread_state(state: Any) -> dict[str, Any]:
+def _summarize_thread_state(
+    state: Any,
+    *,
+    runs: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any]:
     if not isinstance(state, dict):
         return {}
     values = state.get("values")
@@ -773,6 +778,7 @@ def _summarize_thread_state(state: Any) -> dict[str, Any]:
     if not isinstance(interrupts, list):
         interrupts = []
     next_nodes = _normalize_next_nodes(state.get("next"))
+    active_run = _active_run(runs)
     interrupt_summaries = [_summarize_interrupt(item) for item in interrupts]
     generated_image_path = wearing_image_result.get("generated_image_path")
     if not generated_image_path:
@@ -782,6 +788,7 @@ def _summarize_thread_state(state: Any) -> dict[str, Any]:
         next_nodes=next_nodes,
         interrupt_summaries=interrupt_summaries,
         state=state,
+        active_run=active_run,
     )
     return {
         "product_id": product.get("product_id"),
@@ -789,7 +796,7 @@ def _summarize_thread_state(state: Any) -> dict[str, Any]:
         "product_status": product.get("status"),
         "product_title": rawdata.get("title"),
         "next": next_nodes,
-        "current_node_label": _format_node_labels(next_nodes),
+        "current_node_label": _format_node_labels(next_nodes, active_run=active_run),
         "generated_image_path": generated_image_path,
         "wearing_image_status": wearing_image_result.get("status"),
         "wearing_image_status_label": _status_label(
@@ -836,6 +843,7 @@ def _summarize_thread_progress(
     ]
     active_run = _active_run(runs)
     current_node = _current_progress_node(next_nodes, tasks)
+    queued = bool(active_run and active_run.get("status") == "pending" and not current_node)
     progress_status = _progress_status(
         state=state_dict,
         current_node=current_node,
@@ -867,6 +875,7 @@ def _summarize_thread_progress(
         ),
         "active_run": _summarize_run(active_run) if active_run else {},
         "running": bool(active_run and active_run.get("status") == "running"),
+        "queued": queued,
         "started_at": started_at,
         "updated_at": updated_at,
         "elapsed_seconds": elapsed_seconds,
@@ -947,11 +956,15 @@ def _progress_message(
     if task_error:
         return f"节点执行异常：{task_error}"
     if active_run.get("status") == "running":
+        if current_node == "compile_wearing_generation_prompt":
+            return "正在编排穿戴图生图提示词。"
         if current_node == "generate_wearing_image":
             return "正在生成穿戴图，可能正在等待第三方图片接口返回。"
         if current_node:
             return f"正在执行：{_NODE_LABELS.get(current_node, current_node)}。"
         return "任务正在运行。"
+    if active_run.get("status") == "pending" and not current_node:
+        return "任务已创建，正在等待 LangGraph worker 执行。"
     interrupts = state.get("interrupts")
     if isinstance(interrupts, list) and interrupts:
         if current_node == "wait_manual_review":
@@ -1010,10 +1023,13 @@ def _format_duration(seconds: int | None) -> str:
 
 _NODE_LABELS = {
     "load_candidates": "选择商品",
+    "merge_main_images": "准备主图",
     "prepare_main_images": "准备主图",
-    "detect_size_reference": "尺寸检测",
+    "detect_size_reference": "产品合格性检测",
     "select_enroute_reference": "选择 Enroute 参考图",
-    "analyze_enroute_reference": "分析参考图",
+    "learn_enroute_profiles": "学习 Enroute profile",
+    "select_wearing_style_profile": "选择风格与模特",
+    "compile_wearing_generation_prompt": "编排生图提示词",
     "generate_wearing_image": "生成穿戴图",
     "wait_manual_review": "人工审核",
 }
@@ -1035,8 +1051,14 @@ def _normalize_next_nodes(next_value: Any) -> list[str]:
     return []
 
 
-def _format_node_labels(next_nodes: Sequence[str]) -> str:
+def _format_node_labels(
+    next_nodes: Sequence[str],
+    *,
+    active_run: dict[str, Any] | None = None,
+) -> str:
     if not next_nodes:
+        if active_run and active_run.get("status") == "pending":
+            return "等待 worker 执行"
         return "无待执行节点"
     return "、".join(_NODE_LABELS.get(node, node) for node in next_nodes)
 
@@ -1061,6 +1083,7 @@ def _summarize_stop_reason(
     next_nodes: Sequence[str],
     interrupt_summaries: Sequence[dict[str, Any]],
     state: dict[str, Any],
+    active_run: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     wearing_image_result = values.get("wearing_image_result")
     if not isinstance(wearing_image_result, dict):
@@ -1079,7 +1102,10 @@ def _summarize_stop_reason(
         return {
             "code": "manual_review_required",
             "label": "需要人工审核",
-            "detail": "穿戴图已生成，工作流正在等待 approve / regenerate / reject。",
+            "detail": (
+                "穿戴图已生成，工作流正在等待 approve / regenerate / "
+                "recompile_prompt / reject。"
+            ),
         }
 
     if interrupt_summaries:
@@ -1128,18 +1154,26 @@ def _summarize_stop_reason(
     size_status = str(size_reference_result.get("status") or "")
     if size_status in {"failed", "error"}:
         return {
-            "code": "size_reference_failed",
-            "label": "尺寸检测失败",
-            "detail": str(size_reference_result.get("reason") or "尺寸检测节点返回失败。"),
+            "code": "product_qualification_failed",
+            "label": "产品合格性检测失败",
+            "detail": str(
+                size_reference_result.get("reason") or "产品合格性检测节点返回失败。"
+            ),
         }
 
     if next_nodes:
         node = next_nodes[0]
         if node == "detect_size_reference":
             return {
-                "code": "waiting_size_reference",
-                "label": "停在尺寸检测",
+                "code": "waiting_product_qualification",
+                "label": "停在产品合格性检测",
                 "detail": "还没有可审核的穿戴图。",
+            }
+        if node == "compile_wearing_generation_prompt":
+            return {
+                "code": "waiting_prompt_compilation",
+                "label": "停在生图提示词编排",
+                "detail": "当前还没有进入图片生成或人工审核暂停。",
             }
         if node == "generate_wearing_image":
             return {
@@ -1164,6 +1198,13 @@ def _summarize_stop_reason(
             "code": "product_failed",
             "label": "商品处理失败",
             "detail": _reason_label(str(failed_product.get("reason") or "")),
+        }
+
+    if active_run and active_run.get("status") == "pending":
+        return {
+            "code": "run_queued",
+            "label": "排队中",
+            "detail": "任务已创建，正在等待 LangGraph worker 执行。",
         }
 
     return {

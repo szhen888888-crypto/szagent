@@ -246,7 +246,7 @@ start_all() {
     "$LANGGRAPH_LOG_FILE" \
     "$ROOT_DIR" \
     "$LANGGRAPH_PORT" \
-    "$langgraph_bin" dev --host "$LANGGRAPH_HOST" --port "$LANGGRAPH_PORT" --allow-blocking --no-browser
+    "$langgraph_bin" dev --host "$LANGGRAPH_HOST" --port "$LANGGRAPH_PORT" --allow-blocking --no-browser --no-reload
 
   start_process \
     "control-api" \

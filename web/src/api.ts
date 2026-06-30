@@ -11,6 +11,7 @@ export type ServerStatus = {
 export type ThreadSummary = {
   product_id?: string;
   platform?: string;
+  product_url?: string;
   product_status?: string;
   product_title?: string;
   next?: string[];
@@ -35,11 +36,29 @@ export type ThreadProgress = {
   message?: string;
   active_run?: Record<string, unknown>;
   running?: boolean;
+  queued?: boolean;
   started_at?: string;
   updated_at?: string;
   elapsed_seconds?: number | null;
   elapsed_label?: string;
   tasks?: Array<Record<string, unknown>>;
+};
+
+export type AiCallSummary = {
+  key: string;
+  label: string;
+  kind: string;
+  status: string;
+  source: string;
+  attempt_count?: number | null;
+  input_hash?: string;
+  model?: string;
+  providers?: Array<Record<string, unknown>>;
+  prompts?: Record<string, unknown>;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  images: Array<{ label: string; path: string; role: string }>;
+  raw_checkpoint: Record<string, unknown>;
 };
 
 export type WorkflowThread = {
@@ -69,6 +88,7 @@ export type ThreadStateResponse = {
   state: unknown;
   runs?: Array<Record<string, unknown>>;
   progress?: ThreadProgress;
+  ai_calls?: AiCallSummary[];
 };
 
 export type ModelProfile = {
@@ -103,8 +123,18 @@ export type EnrouteLearningItem = {
   enroute_category: string;
   enroute_title: string;
   enroute_handle: string;
+  product_dir: string;
   image_path: string;
   image_position: number;
+  source_url: string;
+  status: string;
+  learning_attempts: number;
+  analysis_id: number | null;
+  metadata: Record<string, unknown>;
+  last_error: string;
+  last_workflow_log_path: string;
+  learned_at: string | null;
+  last_seen_at: string;
   analysis_json: Record<string, unknown>;
   analysis: Record<string, unknown>;
   selected_model_profile: Record<string, unknown>;
@@ -116,11 +146,13 @@ export type EnrouteLearningItem = {
 export type EnrouteLearningResponse = {
   total: number;
   categories: Array<{ category: string; count: number }>;
+  statuses: Array<{ status: string; count: number }>;
   items: EnrouteLearningItem[];
 };
 
 export type ClearEnrouteLearningResponse = {
   deleted_count: number;
+  reference_deleted_count: number;
   total_before: number;
   total_after: number;
   message: string;
@@ -138,6 +170,31 @@ export type ClearFlowsResponse = {
   items: Array<Record<string, unknown>>;
   message: string;
   error?: string;
+};
+
+export type StopFlowResponse = {
+  mode: "stop_flow";
+  api_url: string;
+  thread_id: string;
+  run_count: number;
+  active_runs: number;
+  cancelled_runs: number;
+  items: Array<Record<string, unknown>>;
+  message: string;
+};
+
+export type DeleteFlowResponse = {
+  mode: "delete_flow";
+  api_url: string;
+  assistant_id: string;
+  online: boolean;
+  thread_id: string;
+  deleted_threads: number;
+  products_reset: number;
+  skipped_products: number;
+  item: Record<string, unknown>;
+  items: Array<Record<string, unknown>>;
+  message: string;
 };
 
 export type PromptVersionInfo = {
@@ -260,6 +317,31 @@ export function clearWorkflowFlows(
   });
 }
 
+export function stopWorkflowFlow(apiUrl: string, threadId: string) {
+  return requestJson<StopFlowResponse>(
+    `/api/threads/${encodeURIComponent(threadId)}/stop`,
+    {
+      method: "POST",
+      body: JSON.stringify({ api_url: apiUrl }),
+    },
+  );
+}
+
+export function deleteWorkflowFlow(
+  apiUrl: string,
+  assistantId: string,
+  threadId: string,
+) {
+  return requestJson<DeleteFlowResponse>(
+    `/api/threads/${encodeURIComponent(threadId)}?api_url=${encodeURIComponent(
+      apiUrl,
+    )}&assistant_id=${encodeURIComponent(assistantId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
 export function listPrompts() {
   return requestJson<PromptsResponse>("/api/prompts");
 }
@@ -313,4 +395,19 @@ export function resumeThread(
     method: "POST",
     body: JSON.stringify({ api_url: apiUrl, assistant_id: assistantId, resume }),
   });
+}
+
+export function retryWorkflowNode(
+  apiUrl: string,
+  assistantId: string,
+  threadId: string,
+  node: string,
+) {
+  return requestJson<Record<string, unknown>>(
+    `/api/threads/${encodeURIComponent(threadId)}/retry-node`,
+    {
+      method: "POST",
+      body: JSON.stringify({ api_url: apiUrl, assistant_id: assistantId, node }),
+    },
+  );
 }

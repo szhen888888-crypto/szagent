@@ -25,6 +25,26 @@ def test_render_prompt_template_replaces_named_tokens_only() -> None:
     ) == "hello world; keep {unknown}"
 
 
+def test_render_prompt_template_ignores_values_without_placeholders() -> None:
+    assert render_prompt_template(
+        "hello {name}",
+        {"name": "world", "removed": "value"},
+    ) == "hello world"
+
+
+def test_render_prompt_template_strict_rejects_values_without_placeholders() -> None:
+    try:
+        render_prompt_template(
+            "hello {name}",
+            {"name": "world", "removed": "value"},
+            strict=True,
+        )
+    except KeyError as exc:
+        assert "removed" in str(exc)
+    else:
+        raise AssertionError("expected KeyError")
+
+
 def test_load_latest_prompt_sections_parses_system_and_user(tmp_path) -> None:
     prompt_dir = tmp_path / "prompt"
     prompt_dir.mkdir()

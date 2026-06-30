@@ -74,6 +74,15 @@ def list_enroute_wearing_references(
     return category, _load_category_references(root, category)
 
 
+def list_category_wearing_references(
+    library_dir: str | Path,
+    category: str,
+) -> list[EnrouteReference]:
+    """Load all local 02.jpg references from one explicit Enroute category."""
+
+    return _load_category_references(Path(library_dir), category)
+
+
 def infer_enroute_category(candidate: CandidateProduct) -> str | None:
     """Infer the closest Enroute category from product raw data."""
 
