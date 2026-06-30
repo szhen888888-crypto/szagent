@@ -129,12 +129,6 @@ class ResumeThreadRequest(BaseModel):
     resume: Any = Field(default_factory=dict)
 
 
-class RetryNodeRequest(BaseModel):
-    api_url: str = DEFAULT_LANGGRAPH_API_URL
-    assistant_id: str = DEFAULT_ASSISTANT_ID
-    node: str
-
-
 class PromptSaveRequest(BaseModel):
     dir: str
     version: int
@@ -538,20 +532,6 @@ def resume_thread(thread_id: str, payload: ResumeThreadRequest) -> dict[str, Any
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@app.post("/api/threads/{thread_id}/retry-node")
-def retry_thread_node(thread_id: str, payload: RetryNodeRequest) -> dict[str, Any]:
-    if payload.node != "compile_wearing_generation_prompt":
-        raise HTTPException(status_code=400, detail="unsupported retry node")
-    try:
-        return _retry_compile_wearing_generation_prompt(
-            api_url=payload.api_url,
-            assistant_id=payload.assistant_id,
-            thread_id=thread_id,
-        )
-    except SystemExit as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
 @app.post("/api/review/feishu/callback")
 def feishu_review_callback(payload: dict[str, Any]) -> dict[str, Any]:
     _verify_feishu_callback(payload)
@@ -600,62 +580,6 @@ def _resume_thread(
         "studio_url": _studio_url(base_url, thread_id),
         "resume_payload": resume_payload,
         "multitask_strategy": "reject",
-    }
-
-
-def _retry_compile_wearing_generation_prompt(
-    *,
-    api_url: str,
-    assistant_id: str,
-    thread_id: str,
-) -> dict[str, Any]:
-    from productv2.cli import _api_get_json, _api_post_json, _studio_url
-
-    base_url = api_url.rstrip("/")
-    state = _api_get_json(base_url, f"/threads/{thread_id}/state")
-    values = state.get("values") if isinstance(state, dict) else {}
-    if not isinstance(values, dict):
-        values = {}
-    prompt_result = values.get("wearing_generation_prompt_result")
-    if not isinstance(prompt_result, dict) or not prompt_result:
-        raise SystemExit("当前 thread 没有可重试的生图提示词编排结果。")
-
-    update_values = {
-        "wearing_generation_prompt_result": {},
-        "wearing_image_result": {},
-        "manual_review_request": {},
-        "manual_review_decision": {"action": "recompile_prompt"},
-    }
-    state_update = _api_post_json(
-        base_url,
-        f"/threads/{thread_id}/state",
-        {
-            "values": update_values,
-            "as_node": "select_wearing_style_profile",
-        },
-    )
-    run = _api_post_json(
-        base_url,
-        f"/threads/{thread_id}/runs",
-        {
-            "assistant_id": assistant_id,
-            "input": {},
-            "multitask_strategy": "reject",
-            "metadata": {"retry_node": "compile_wearing_generation_prompt"},
-        },
-    )
-    return {
-        "mode": "retry_node",
-        "node": "compile_wearing_generation_prompt",
-        "api_url": base_url,
-        "assistant_id": assistant_id,
-        "thread_id": thread_id,
-        "run_id": run["run_id"],
-        "state_url": f"{base_url}/threads/{thread_id}/state",
-        "studio_url": _studio_url(base_url, thread_id),
-        "state_update": state_update,
-        "multitask_strategy": "reject",
-        "message": "已从编排生图提示词节点重新执行。",
     }
 
 

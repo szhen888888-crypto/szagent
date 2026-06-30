@@ -34,7 +34,6 @@ from productv2.enroute_learning import (
 from productv2.images import merge_remote_images_to_numbered_collage, product_asset_dir
 from productv2.manual_review import (
     REVIEW_ACTION_APPROVE,
-    REVIEW_ACTION_RECOMPILE_PROMPT,
     REVIEW_ACTION_REGENERATE,
     REVIEW_ACTION_REJECT,
     build_wearing_image_review_request,
@@ -103,8 +102,7 @@ class ListingWorkflowState(TypedDict, total=False):
 
 
 MAX_WEARING_REGENERATE_ATTEMPTS = 3
-PROMPT_RETRY_REVIEW_ACTIONS = {REVIEW_ACTION_RECOMPILE_PROMPT}
-IMAGE_RETRY_REVIEW_ACTIONS = {REVIEW_ACTION_REGENERATE, *PROMPT_RETRY_REVIEW_ACTIONS}
+IMAGE_RETRY_REVIEW_ACTIONS = {REVIEW_ACTION_REGENERATE}
 ENROUTE_LEARNING_TARGET_CACHE_SIZE = 5
 ENROUTE_LEARNING_INITIAL_BATCH_SIZE = 5
 ENROUTE_LEARNING_INCREMENTAL_BATCH_SIZE = 1
@@ -746,14 +744,7 @@ def _compile_wearing_generation_prompt(
             product_asset_dir(candidates[0], product_assets_dir(state))
         ),
     )
-    review_action = str(
-        state.get("manual_review_decision", {}).get("action") or ""
-    ).lower()
-    cached = (
-        None
-        if review_action in PROMPT_RETRY_REVIEW_ACTIONS
-        else get_ai_checkpoint_result(state, checkpoint_key, checkpoint_input)
-    )
+    cached = get_ai_checkpoint_result(state, checkpoint_key, checkpoint_input)
     if cached is not None:
         result = dict(cached)
         missing = [
@@ -1213,13 +1204,6 @@ def _route_manual_review_decision(
             if attempt < MAX_WEARING_REGENERATE_ATTEMPTS
             else "mark_failed_and_reload_candidates"
         )
-    elif action == REVIEW_ACTION_RECOMPILE_PROMPT:
-        attempt = int(state.get("wearing_generation_attempt") or 0)
-        branch = (
-            "compile_wearing_generation_prompt"
-            if attempt < MAX_WEARING_REGENERATE_ATTEMPTS
-            else "mark_failed_and_reload_candidates"
-        )
     elif action == REVIEW_ACTION_REJECT:
         branch = "mark_failed_and_reload_candidates"
     else:
@@ -1420,7 +1404,6 @@ def build_listing_graph(logger: WorkflowRunLogger | None = None):
         _route("wait_manual_review", _route_manual_review_decision, logger),
         {
             "build_listing_drafts": "build_listing_drafts",
-            "compile_wearing_generation_prompt": "compile_wearing_generation_prompt",
             "generate_wearing_image": "generate_wearing_image",
             "mark_failed_and_reload_candidates": "mark_failed_and_reload_candidates",
         },

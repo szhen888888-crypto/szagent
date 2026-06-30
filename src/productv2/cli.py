@@ -451,8 +451,7 @@ def restart_workflow_via_api(
                 "skipped_threads": skipped_threads,
                 "message": (
                     "存在等待人工审核的 thread，安全恢复未自动继续。"
-                    "请在任务详情中提交 approve / regenerate / "
-                    "recompile_prompt / reject。"
+                    "请在任务详情中提交 approve / regenerate / reject。"
                 ),
             }
         try:
@@ -559,8 +558,7 @@ def _restart_selected_thread_via_api(
             "summary": summary,
             "message": (
                 "当前选中的 thread 正在等待人工审核。"
-                "请在任务详情中提交 approve / regenerate / "
-                "recompile_prompt / reject。"
+                "请在任务详情中提交 approve / regenerate / reject。"
             ),
         }
     try:
@@ -1103,8 +1101,7 @@ def _summarize_stop_reason(
             "code": "manual_review_required",
             "label": "需要人工审核",
             "detail": (
-                "穿戴图已生成，工作流正在等待 approve / regenerate / "
-                "recompile_prompt / reject。"
+                "穿戴图已生成，工作流正在等待 approve / regenerate / reject。"
             ),
         }
 

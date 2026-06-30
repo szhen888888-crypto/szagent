@@ -202,7 +202,6 @@ def test_restart_workflow_prefers_interrupted_thread_without_resume(
                         "options": [
                             "approve",
                             "regenerate",
-                            "recompile_prompt",
                             "reject",
                         ],
                     },
@@ -261,7 +260,6 @@ def test_restart_workflow_resumes_interrupted_thread_when_payload_is_given(
                         "options": [
                             "approve",
                             "regenerate",
-                            "recompile_prompt",
                             "reject",
                         ],
                     },

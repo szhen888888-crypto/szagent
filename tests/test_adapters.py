@@ -99,6 +99,7 @@ def test_1688_adapter_extracts_main_and_specification_images() -> None:
                     "https://cbu01.alicdn.com/img/ibank/main.jpg_.webp",
                     "https://cbu01.alicdn.com/img/ibank/main.jpg_.webp",
                     "https://cbu01.alicdn.com/img/ibank/main.jpg_sum.jpg",
+                    "https://cbu01.alicdn.com/img/ibank/2020/detail.jpg",
                 ],
                 "sku_images": {
                     "red": "https://cbu01.alicdn.com/img/ibank/red.jpg_.webp"
@@ -115,3 +116,86 @@ def test_1688_adapter_extracts_main_and_specification_images() -> None:
     assert adapter.get_specification_images(candidate) == [
         "https://cbu01.alicdn.com/img/ibank/red.jpg_.webp"
     ]
+
+
+def test_1688_adapter_extracts_carousel_original_block_without_count_cap() -> None:
+    adapter_module = importlib.import_module("productv2.adapters.1688")
+    main_urls = [
+        f"https://cbu01.alicdn.com/img/ibank/O1CN{i:02d}_!!2208000649741-0-cib.jpg_.webp"
+        for i in range(1, 7)
+    ]
+    detail_url = "https://cbu01.alicdn.com/img/ibank/2020/428/378/detail.jpg"
+    candidate = CandidateProduct(
+        product_id="p-1",
+        platform="1688",
+        rawdata={
+            "detail": {
+                "image_urls": [
+                    "https://img.alicdn.com/imgextra/i4/icon-55-tps-15-14.svg",
+                    *main_urls,
+                    "https://cbu01.alicdn.com/img/ibank/thumbnail.jpg_sum.jpg",
+                    "https://img.alicdn.com/imgextra/i4/service-55-tps-24-24.svg",
+                    detail_url,
+                ],
+            }
+        },
+    )
+
+    adapter = adapter_module.Adapter()
+
+    assert adapter.get_main_images(candidate) == main_urls
+    assert detail_url not in adapter.get_main_images(candidate)
+
+
+def test_1688_adapter_supports_legacy_ibank_webp_carousel_urls() -> None:
+    adapter_module = importlib.import_module("productv2.adapters.1688")
+    main_urls = [
+        "https://cbu01.alicdn.com/img/ibank/18753846983_1951522908.jpg_.webp",
+        "https://cbu01.alicdn.com/img/ibank/18753843806_1951522908.jpg_.webp",
+        "https://cbu01.alicdn.com/img/ibank/18753852894_1951522908.jpg_.webp",
+    ]
+    candidate = CandidateProduct(
+        product_id="p-1",
+        platform="1688",
+        rawdata={
+            "detail": {
+                "image_urls": [
+                    "https://img.alicdn.com/imgextra/i4/icon-55-tps-15-14.svg",
+                    *main_urls,
+                    "https://img.alicdn.com/imgextra/i4/service-55-tps-24-24.svg",
+                    "https://cbu01.alicdn.com/img/ibank/2020/428/378/detail.jpg",
+                ],
+            }
+        },
+    )
+
+    adapter = adapter_module.Adapter()
+
+    assert adapter.get_main_images(candidate) == main_urls
+
+
+def test_1688_adapter_does_not_continue_past_carousel_block() -> None:
+    adapter_module = importlib.import_module("productv2.adapters.1688")
+    main_urls = [
+        f"https://cbu01.alicdn.com/img/ibank/O1CN{i:02d}_!!2208000649741-0-cib.jpg_.webp"
+        for i in range(1, 5)
+    ]
+    later_detail_url = "https://cbu01.alicdn.com/img/ibank/2020/428/378/detail.jpg_.webp"
+    candidate = CandidateProduct(
+        product_id="p-1",
+        platform="1688",
+        rawdata={
+            "detail": {
+                "image_urls": [
+                    "https://img.alicdn.com/imgextra/i4/icon-55-tps-15-14.svg",
+                    *main_urls,
+                    "https://img.alicdn.com/imgextra/i4/service-55-tps-24-24.svg",
+                    later_detail_url,
+                ],
+            }
+        },
+    )
+
+    adapter = adapter_module.Adapter()
+
+    assert adapter.get_main_images(candidate) == main_urls

@@ -56,6 +56,12 @@ def test_build_wearing_prompt_compiler_payload_uses_material_contract() -> None:
     assert "最终 prompt 必须使用 JSON 风格多维参数定位照片" in system_text
     assert "Enroute滤镜与后期" in system_text
     assert "无法从 Enroute profile 精确推断时" in system_text
+    assert "目光与面向角度" in system_text
+    assert "gaze_direction" in system_text
+    assert "face_yaw_relative_to_camera" in system_text
+    assert "face_pitch_relative_to_camera" in system_text
+    assert "torso_yaw_relative_to_camera" in system_text
+    assert "相对摄像机角度" in system_text
     assert "不是拼接所有材料" in system_text
     assert "最大输出 5000 字符" in system_text
     assert "禁止湿发" in system_text

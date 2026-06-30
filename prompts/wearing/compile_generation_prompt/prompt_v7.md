@@ -20,7 +20,7 @@
 
 凝练规则：
 - Enroute profile 是一份很大的逆向分析 JSON。你只挑选对生成图有直接作用的字段，忽略 confidence、evidence、not_inferable 等过程性内容。
-- 可在内部参考 Enroute 逆向 profile 的 `observed_facts`、`estimated_shooting_profile`（含 `camera_estimate`、`lighting_estimate`、`pose_estimate`、`composition_profile`、`background_profile`、`retouching_and_makeup_policy`）和 `transfer_notes.stable_reference_features` 等维度，但最终只保留对图片生成有直接作用的信息。
+- 可在内部参考 Enroute 逆向 profile 的 `observed_facts`、`estimated_shooting_profile`（含 `camera_estimate`、`lighting_estimate`、`pose_estimate`、`composition_profile`、`background_profile`、`retouching_and_makeup_policy`）和 `transfer_notes.stable_reference_features` 等维度；尤其要从 `pose_estimate.gaze_target`、`pose_estimate.head_yaw/head_pitch/head_roll`、`torso_rotation`、`observed_facts.pose_observation.gaze/head_angle/torso_angle`、`camera_yaw/pitch/roll` 中提炼模特目光方向与面向摄像机的相对角度。最终只保留对图片生成有直接作用的信息。
 - 优先采用 `transfer_notes.stable_reference_features` 中的稳定特征；明确忽略 `transfer_notes.do_not_transfer_from_reference` 中列出的不可继承元素。
 - 删除弱相关、重复、抽象和无法执行的信息。
 - 不要把 Enroute profile、固定模特 profile 或商品材料逐字段复述。
@@ -51,6 +51,15 @@
     "表情": "明确一个表情",
     "体态": "明确肩颈、头部、躯干方向"
   },
+  "目光与面向角度": {
+    "gaze_direction": "参考 Enroute 模特视线，明确看向镜头/镜头外左侧/镜头外右侧/向下看首饰/远处等具体目标",
+    "gaze_camera_contact": "direct_to_camera / near_camera / off_camera_left / off_camera_right / downward_to_jewelry / distant_off_frame 之一或近似中文表达",
+    "face_yaw_relative_to_camera": "脸部相对摄像机偏航角，写具体近似值，例如正对 0°、向左约 15°、向右约 25°、三分之二侧脸约 35°",
+    "face_pitch_relative_to_camera": "脸部相对摄像机俯仰角，例如微低头约 -8°、平视 0°、微抬头约 +5°",
+    "face_roll_relative_to_camera": "头部左右倾斜角，例如向左倾约 5°，无法判断则写 0-3°自然微倾",
+    "torso_yaw_relative_to_camera": "躯干/肩线相对摄像机角度，例如正对、左肩靠前约 15°、右肩靠前约 20°",
+    "camera_relation": "说明这是模特面部、眼神和躯干相对于摄像机的关系，不是内部分析字段；要让图片生成模型直接按这个角度摆放人物"
+  },
   "发型": {
     "正向要求": "自然干发、干爽松散发丝、自然碎发",
     "禁止": "禁止湿发、微湿发、油亮湿感、wet hair、wet-textured hair；即使固定模特 profile 中出现 wet texture，也必须改写为干发"
@@ -72,6 +81,7 @@
     "相机距离": "近似米数或范围",
     "机位高度": "相对嘴部、颈部、胸口或眼平线的位置",
     "俯仰/偏航/滚转": "若无法精确推断，用小角度近似表达",
+    "与人物角度关系": "结合目光与面向角度，说明摄像机在人物正前方、左前方或右前方，以及人物脸部/躯干相对镜头的角度",
     "对焦点": "首饰、颈部、锁骨或下半脸的具体区域",
     "景深": "f 值观感或浅/中/深景深"
   },
@@ -116,6 +126,7 @@
 - 最终 prompt 必须明确指明：image 01 是产品来源，image 02 是尺寸/佩戴比例来源，fixed model image 是身份来源。
 - 最终 prompt 必须使用 JSON 风格多维参数定位照片，不要输出一整段散文。
 - 最终 prompt 必须包含 Enroute 滤镜与后期参数；无法从 Enroute profile 精确推断时，用“近似、视觉等效、约”表达，不要留空。
+- 最终 prompt 必须包含“目光与面向角度”维度：明确模特视线目标、是否看向镜头、脸部 yaw/pitch/roll、躯干/肩线相对摄像机角度，以及摄像机与人物的相对方位；无法精确推断时用近似角度表达，不要留空。
 - 最终 prompt 必须明确写出干爽自然发丝，并在负面约束中包含 wet hair。
 - 不允许输出“参考 Enroute profile 中的某字段”这类内部话术；要直接转译成图片生成模型能执行的视觉参数。
 - 不允许把所有输入材料一股脑组装进去。

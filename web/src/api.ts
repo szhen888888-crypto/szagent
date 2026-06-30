@@ -396,18 +396,3 @@ export function resumeThread(
     body: JSON.stringify({ api_url: apiUrl, assistant_id: assistantId, resume }),
   });
 }
-
-export function retryWorkflowNode(
-  apiUrl: string,
-  assistantId: string,
-  threadId: string,
-  node: string,
-) {
-  return requestJson<Record<string, unknown>>(
-    `/api/threads/${encodeURIComponent(threadId)}/retry-node`,
-    {
-      method: "POST",
-      body: JSON.stringify({ api_url: apiUrl, assistant_id: assistantId, node }),
-    },
-  );
-}

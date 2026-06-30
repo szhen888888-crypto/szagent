@@ -32,6 +32,7 @@ import {
   Sparkles,
   Square,
   Trash2,
+  X,
 } from "lucide-react";
 import Zoom from "react-medium-image-zoom";
 import {
@@ -56,7 +57,6 @@ import {
   restartServer,
   restartWorkflow,
   resumeThread,
-  retryWorkflowNode,
   ServerStatus,
   startServer,
   startWorkflow,
@@ -86,14 +86,12 @@ type ActionKey =
   | "server-restart"
   | "workflow-start"
   | "workflow-restart"
-  | "retry-compile-prompt"
   | "clear-flows"
   | "flow-stop"
   | "flow-delete"
   | "clear-enroute"
   | "resume-approve"
   | "resume-regenerate"
-  | "resume-recompile-prompt"
   | "resume-reject"
   | "resume-custom";
 
@@ -323,8 +321,17 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threads, selectedThreadId, apiUrl, assistantId]);
 
+  useEffect(() => {
+    if (!error) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setError(""), 10000);
+    return () => window.clearTimeout(timer);
+  }, [error]);
+
   return (
     <main className="min-h-screen text-zinc-950">
+      <ErrorToast message={error} onClose={() => setError("")} />
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-6">
         <header className="flex flex-col gap-4 rounded-2xl border border-zinc-200/70 bg-white/70 p-5 shadow-[0_1px_2px_rgba(24,24,27,0.04),0_12px_32px_-16px_rgba(24,24,27,0.16)] backdrop-blur md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-3.5">
@@ -373,7 +380,6 @@ export default function App() {
           </div>
         </header>
 
-        {error ? <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50/80 p-3.5 text-sm text-red-700 shadow-sm"><span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-red-500" />{error}</div> : null}
         {notice ? <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50/80 p-3.5 text-sm text-amber-800 shadow-sm"><span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-amber-500" />{notice}</div> : null}
 
         {page === "tasks" ? (
@@ -473,12 +479,6 @@ export default function App() {
                     actionKey,
                   )
                 }
-                onRetryNode={(node) =>
-                  runAction(
-                    () => retryWorkflowNode(apiUrl, assistantId, selectedThreadId, node),
-                    "retry-compile-prompt",
-                  )
-                }
                 onOpenStudio={() => selectedThread?.studio_url && window.open(selectedThread.studio_url, "_blank")}
               />
               <ResultPanel result={lastResult} />
@@ -556,6 +556,39 @@ function PageNav({
         提示词
       </Button>
     </nav>
+  );
+}
+
+function ErrorToast({
+  message,
+  onClose,
+}: {
+  message: string;
+  onClose: () => void;
+}) {
+  if (!message) {
+    return null;
+  }
+  return (
+    <div className="fixed right-4 top-4 z-50 w-[calc(100vw-2rem)] max-w-md">
+      <div className="flex items-start gap-3 rounded-lg border border-red-200 bg-white px-4 py-3 text-sm text-red-800 shadow-lg shadow-red-950/10 ring-1 ring-red-100">
+        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+        <div className="min-w-0 flex-1">
+          <p className="font-medium text-red-900">操作失败</p>
+          <p className="mt-1 max-h-28 overflow-auto break-words leading-5">
+            {message}
+          </p>
+        </div>
+        <button
+          type="button"
+          aria-label="关闭异常提示"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-red-700 transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-300"
+          onClick={onClose}
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -1389,7 +1422,6 @@ function ThreadDetail({
   loading,
   activeAction,
   onResume,
-  onRetryNode,
   onOpenStudio,
 }: {
   thread?: WorkflowThread;
@@ -1400,7 +1432,6 @@ function ThreadDetail({
   loading: boolean;
   activeAction: ActionKey | null;
   onResume: (payload: unknown, actionKey: ActionKey) => void;
-  onRetryNode: (node: string) => void;
   onOpenStudio: () => void;
 }) {
   if (!thread) {
@@ -1432,7 +1463,6 @@ function ThreadDetail({
     resumeJson,
     setResumeJson,
     onResume,
-    onRetryNode,
   });
   const doneCount = nodes.filter((node) => node.state === "done").length;
 
@@ -1945,7 +1975,7 @@ function ManualReviewActions({
   return (
     <div className="space-y-3">
       <p className="text-sm font-medium">审核动作</p>
-      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-2 sm:grid-cols-3">
         <Button
           onClick={() => onResume({ action: "approve" }, "resume-approve")}
           disabled={disabled}
@@ -1962,17 +1992,6 @@ function ManualReviewActions({
           loadingText="提交中"
         >
           Regenerate
-        </Button>
-        <Button
-          variant="outline"
-          onClick={() =>
-            onResume({ action: "recompile_prompt" }, "resume-recompile-prompt")
-          }
-          disabled={disabled}
-          loading={activeAction === "resume-recompile-prompt"}
-          loadingText="提交中"
-        >
-          Recompile Prompt
         </Button>
         <Button
           variant="destructive"
@@ -2194,7 +2213,6 @@ function buildWorkflowNodes({
   resumeJson,
   setResumeJson,
   onResume,
-  onRetryNode,
 }: {
   thread: WorkflowThread;
   state: unknown;
@@ -2206,7 +2224,6 @@ function buildWorkflowNodes({
   resumeJson: string;
   setResumeJson: (value: string) => void;
   onResume: (payload: unknown, actionKey: ActionKey) => void;
-  onRetryNode: (node: string) => void;
 }): WorkflowNode[] {
   const root = asRecord(state);
   const values = asRecord(root.values);
@@ -2369,9 +2386,6 @@ function buildWorkflowNodes({
       content: (
         <WearingPromptPanel
           result={wearingPrompt}
-          loading={loading}
-          activeAction={activeAction}
-          onRetry={() => onRetryNode("compile_wearing_generation_prompt")}
         />
       ),
     },
@@ -2834,17 +2848,7 @@ function WearingStyleSelectionPanel({
   );
 }
 
-function WearingPromptPanel({
-  result,
-  loading,
-  activeAction,
-  onRetry,
-}: {
-  result: Record<string, unknown>;
-  loading: boolean;
-  activeAction: ActionKey | null;
-  onRetry: () => void;
-}) {
+function WearingPromptPanel({ result }: { result: Record<string, unknown> }) {
   const selectedModel = resolvedSelectedModel(result);
   const inputImages = arrayValue(result.input_images)
     .map((item) => stringValue(item))
@@ -2852,30 +2856,9 @@ function WearingPromptPanel({
   const prompt = stringValue(result.prompt);
   const enrouteImagePath = stringValue(result.enroute_reference_image_path);
   const hasRaw = Object.keys(result).length > 0;
-  const disabled = loading || !hasRaw;
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">
-        <div>
-          <p className="text-sm font-medium">提示词操作</p>
-          <p className="mt-1 text-xs text-zinc-500">
-            {hasRaw ? "从当前节点重新编排提示词并继续生图。" : "提示词编排完成后可重试。"}
-          </p>
-        </div>
-        <Button
-          variant="outline"
-          onClick={onRetry}
-          disabled={disabled}
-          loading={activeAction === "retry-compile-prompt"}
-          loadingText="提交中"
-          title={hasRaw ? "重编排提示词并重新生成穿戴图" : "提示词编排完成后可重试"}
-        >
-          <RefreshCcw className="h-4 w-4" />
-          重试提示词编排
-        </Button>
-      </div>
-
       <div className="grid gap-3 lg:grid-cols-2">
         <KeyValuePanel
           title="编排结果"

@@ -389,7 +389,6 @@ def _review_action_style(action: str) -> tuple[str, str]:
     styles = {
         "approve": ("通过", "green"),
         "regenerate": ("重生成", "orange"),
-        "recompile_prompt": ("重编排提示词", "orange"),
         "reject": ("拒绝", "red"),
     }
     return styles.get(action, ("已处理", "blue"))
@@ -399,7 +398,6 @@ def _success_message(action: str) -> str:
     labels = {
         "approve": "已提交通过。",
         "regenerate": "已提交重生成。",
-        "recompile_prompt": "已提交重编排提示词。",
         "reject": "已提交拒绝。",
     }
     return labels.get(action, "已提交审核动作。")

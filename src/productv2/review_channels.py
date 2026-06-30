@@ -316,11 +316,6 @@ def _review_card_actions(
                     "default",
                     {**context, "action": "regenerate"},
                 ),
-                _review_action_button(
-                    "重编排提示词",
-                    "default",
-                    {**context, "action": "recompile_prompt"},
-                ),
                 _review_action_button("拒绝", "danger", {**context, "action": "reject"}),
             ]
         )
